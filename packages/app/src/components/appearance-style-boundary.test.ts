@@ -21,12 +21,13 @@ describe("appearanceStyleBoundaryKey", () => {
 // Native Gesture Handler/Fabric lifetime behavior is verified on the release app.
 describe("retained native gesture host appearance placement", () => {
   it.each([
-    ["../app/_layout.tsx", ["sidebarChrome", "themedSidebarChrome"]],
+    ["../app/_layout.tsx", ["sidebarChrome", "themedSidebarChrome"], true],
     [
-      "./compact-explorer-sidebar-host.tsx",
-      ["explorer", "themedExplorer", "CompactExplorerSidebar", "NativeExplorerSidebarDock"],
+      "../screens/workspace/workspace-screen.tsx",
+      ["CompactExplorerSidebar", "NativeExplorerSidebarDock"],
+      false,
     ],
-  ] as const)("keeps native hosts outside appearance keys in %s", (path, hosts) => {
+  ] as const)("keeps native hosts outside appearance keys in %s", (path, hosts, hasWebKeys) => {
     const source = ts.createSourceFile(
       path,
       readFileSync(new URL(path, import.meta.url), "utf8"),
@@ -68,6 +69,6 @@ describe("retained native gesture host appearance placement", () => {
     }
     visit(source);
     expect(hostsFound).toBeGreaterThan(0);
-    expect(webKeysFound).toBeGreaterThan(0);
+    if (hasWebKeys) expect(webKeysFound).toBeGreaterThan(0);
   });
 });

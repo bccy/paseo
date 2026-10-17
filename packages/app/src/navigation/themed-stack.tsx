@@ -1,8 +1,19 @@
-import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
 import { Stack } from "expo-router";
-import { isValidElement, type ReactElement, type ReactNode, useCallback, useMemo } from "react";
+import {
+  isValidElement,
+  type ComponentProps,
+  type ReactElement,
+  type ReactNode,
+  useCallback,
+  useMemo,
+} from "react";
 import { withUnistyles } from "react-native-unistyles";
 import { AppearanceStyleBoundary } from "@/components/appearance-style-boundary";
+
+type NativeStackNavigationOptions = Exclude<
+  NonNullable<ComponentProps<typeof Stack>["screenOptions"]>,
+  (...args: never[]) => unknown
+>;
 
 interface ThemedStackBaseProps {
   backgroundColor: string;

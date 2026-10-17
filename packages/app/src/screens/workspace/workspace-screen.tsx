@@ -5,6 +5,12 @@ import {
   type InlinePathTarget,
 } from "@/assistant-file-links";
 import { useFileExplorerActions } from "@/hooks/use-file-explorer-actions";
+import type { LayoutChangeEvent } from "react-native";
+import { ExplorerSidebarDock } from "@/screens/workspace/explorer-sidebar";
+import {
+  CompactExplorerSidebar,
+  NativeExplorerSidebarDock,
+} from "@/components/compact-explorer-sidebar";
 import {
   WorkspaceComposerEditingSessionsProvider,
   useComposerTabFullscreen,
@@ -25,7 +31,7 @@ import {
   type ReactNode,
 } from "react";
 import { useStoreWithEqualityFn } from "zustand/traditional";
-import { useIsFocused } from "@react-navigation/native";
+import { useIsFocused } from "expo-router/react-navigation";
 import { BackHandler, Text, View } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
 import { useRouter, type Href } from "expo-router";
@@ -1432,6 +1438,8 @@ function WorkspaceScreenContent({
     sheetTab,
     routeFocused: isRouteFocused,
     focusedPaneOnly: syncFocusedPaneOnly,
+    explorerPaneId: explorerSidebarPaneId,
+    explorerVisible: isExplorerSidebarShowing,
   });
   useEffect(() => {
     for (const agentId of visibleAgentIds) {
@@ -2971,11 +2979,7 @@ function WorkspaceScreenContent({
         normalizedWorkspaceId,
         host:
           input.host ??
-          (canRenderDesktopPaneSplits &&
-          input.paneId !== null &&
-          input.paneId === explorerSidebarPaneId
-            ? "explorer"
-            : "main"),
+          (input.paneId !== null && input.paneId === explorerSidebarPaneId ? "explorer" : "main"),
         fileNavigationRevision: fileNavigationRevisionByTabId[input.tab.tabId] ?? 0,
         onOpenTab: (target) => {
           if (!persistenceKey) {
@@ -3657,6 +3661,102 @@ function WorkspaceScreenContent({
     </View>
   );
 
+  const [workspaceViewportWidth, setWorkspaceViewportWidth] = useState(0);
+  const measureWorkspaceWidth = useCallback(
+    (event: LayoutChangeEvent) => setWorkspaceViewportWidth(event.nativeEvent.layout.width),
+    [],
+  );
+  const sharedExplorer = useMemo(() => {
+    if (
+      !workspaceLayout ||
+      !explorerSidebarPaneId ||
+      !persistenceKey ||
+      (!isMobile && canRenderDesktopPaneSplits)
+    )
+      return null;
+    const explorerPane = findPaneById(workspaceLayout.root, explorerSidebarPaneId);
+    if (!explorerPane) return null;
+    const dock = (
+      <WorkspacePanelProviders
+        launcher={newTabLauncher}
+        workspaceKey={workspacePanelKey}
+        tabIds={workspacePanelTabIds}
+      >
+        <ExplorerSidebarDock
+          pane={explorerPane}
+          uiTabs={uiTabs}
+          normalizedServerId={normalizedServerId}
+          normalizedWorkspaceId={normalizedWorkspaceId}
+          isWorkspaceFocused={isRouteFocused && isExplorerSidebarShowing}
+          closingTabIds={closingTabIds}
+          activeDragTabId={null}
+          tabDropPreview={null}
+          hoveredCloseTabKey={hoveredCloseTabKey}
+          setHoveredCloseTabKey={setHoveredCloseTabKey}
+          onSelectTab={selectTabInPane}
+          onCloseTab={handleCloseTabById}
+          onCreateNewTab={handleCreateNewTab}
+          onCopyResumeCommand={handleCopyResumeCommand}
+          onCopyAgentId={handleCopyAgentId}
+          onCopyTerminalId={handleCopyTerminalId}
+          onCopyFilePath={handleCopyFilePath}
+          onReloadAgent={handleReloadAgent}
+          onRenameTab={handleRenameTab}
+          onCloseTabsToLeft={handleCloseTabsToLeftInPane}
+          onCloseTabsToRight={handleCloseTabsToRightInPane}
+          onCloseOtherTabs={handleCloseOtherTabsInPane}
+          onExitFocusMode={toggleFocusMode}
+          onReorderTabsInPane={handleReorderTabsInPane}
+          buildPaneContentModel={buildDesktopPaneContentModel}
+          headerAction={renderExplorerSidebarHeaderAction()}
+        />
+      </WorkspacePanelProviders>
+    );
+    if (isMobile) return <CompactExplorerSidebar>{dock}</CompactExplorerSidebar>;
+    return (
+      <NativeExplorerSidebarDock
+        persistenceKey={persistenceKey}
+        containerWidth={workspaceViewportWidth}
+        isOpen={isExplorerSidebarShowing}
+      >
+        {dock}
+      </NativeExplorerSidebarDock>
+    );
+  }, [
+    workspaceLayout,
+    explorerSidebarPaneId,
+    persistenceKey,
+    isMobile,
+    canRenderDesktopPaneSplits,
+    newTabLauncher,
+    workspacePanelKey,
+    workspacePanelTabIds,
+    uiTabs,
+    normalizedServerId,
+    normalizedWorkspaceId,
+    isRouteFocused,
+    isExplorerSidebarShowing,
+    closingTabIds,
+    hoveredCloseTabKey,
+    selectTabInPane,
+    handleCloseTabById,
+    handleCreateNewTab,
+    handleCopyResumeCommand,
+    handleCopyAgentId,
+    handleCopyTerminalId,
+    handleCopyFilePath,
+    handleReloadAgent,
+    handleRenameTab,
+    handleCloseTabsToLeftInPane,
+    handleCloseTabsToRightInPane,
+    handleCloseOtherTabsInPane,
+    toggleFocusMode,
+    handleReorderTabsInPane,
+    buildDesktopPaneContentModel,
+    renderExplorerSidebarHeaderAction,
+    workspaceViewportWidth,
+  ]);
+
   const { revealDirectory } = useFileExplorerActions({
     serverId: normalizedServerId,
     workspaceId: normalizedWorkspaceId,
@@ -3703,9 +3803,10 @@ function WorkspaceScreenContent({
           workspaceId={normalizedWorkspaceId}
           isRouteFocused={isRouteFocused}
         />
-        <View style={styles.threePaneRow}>
+        <View style={styles.threePaneRow} onLayout={measureWorkspaceWidth}>
           <FloatingPanelPortalHostNameProvider hostName={workspaceFloatingPanelPortalHostName}>
             {workspaceCenterColumn}
+            {sharedExplorer}
           </FloatingPanelPortalHostNameProvider>
           <FloatingPanelPortalHost name={workspaceFloatingPanelPortalHostName} />
         </View>
@@ -3951,7 +4052,7 @@ const styles = StyleSheet.create((theme) => ({
     position: "relative",
   },
   mobileMountedTabSlot: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
   },
   contentPlaceholder: {
     flex: 1,

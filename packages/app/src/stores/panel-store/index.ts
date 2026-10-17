@@ -85,6 +85,7 @@ export interface PanelState {
   exitFocusMode: () => void;
   showMobileAgent: () => void;
   showMobileAgentList: () => void;
+  showMobileFileExplorer: () => void;
   toggleMobileAgentList: () => void;
   openDesktopAgentList: () => void;
   closeDesktopAgentList: () => void;
@@ -158,6 +159,8 @@ export const usePanelStore = create<PanelState>()(
       showMobileAgent: () => set((state) => setMobilePanelTargetPatch(state, "agent")),
 
       showMobileAgentList: () => set((state) => setMobilePanelTargetPatch(state, "agent-list")),
+      showMobileFileExplorer: () =>
+        set((state) => setMobilePanelTargetPatch(state, "file-explorer")),
 
       toggleMobileAgentList: () =>
         set((state) =>

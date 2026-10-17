@@ -1,3 +1,6 @@
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
+import { useIsExplorerSidebarOpen } from "@/workspace-tabs/explorer-sidebar";
 import { ComposerEditingSessionsProvider } from "@/composer/editing-session";
 import "@/styles/unistyles";
 import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
@@ -468,7 +471,9 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   const isFocusModeEnabled = usePanelStore((state) => state.desktop.focusModeEnabled);
   const isDesktopAgentListOpen = usePanelStore((state) => state.desktop.agentListOpen);
   const sidebarWidth = usePanelStore((state) => state.sidebarWidth);
-  const { width: viewportWidth } = useWindowDimensions();
+  const { width: windowWidth } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const viewportWidth = windowWidth - insets.left - insets.right;
 
   const cycleTheme = useCallback(() => {
     void updateSettings({ theme: getNextThemePreference(settings.theme) });
@@ -478,7 +483,7 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   const explorerSidebarPresentation = resolveExplorerSidebarPresentation({
     isCompact: isCompactLayout,
   });
-  const usesCompactExplorerHost = explorerSidebarPresentation !== "pane";
+  const usesCompactExplorerHost = explorerSidebarPresentation === "overlay";
   useCompactWebViewportZoomLock(isCompactLayout);
   const pathname = usePathname();
   const isWorkspaceRoute = parseHostWorkspaceRouteFromPathname(pathname) !== null;
@@ -516,7 +521,15 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   useActiveWorktreeNewAction();
   useGlobalNewWorkspaceAction();
 
+  const activeWorkspace = useActiveWorkspaceSelection();
+  const explorerVisible = useIsExplorerSidebarOpen({
+    isCompact: isCompactLayout,
+    workspaceKey: activeWorkspace
+      ? `${activeWorkspace.serverId}:${activeWorkspace.workspaceId}`
+      : null,
+  });
   const appContentMinimumWidth = resolveDesktopAppContentMinimum({
+    explorerVisible: isWorkspaceRoute && explorerVisible,
     isSettingsRoute: pathname.includes("/settings"),
   });
   const desktopSidebarMounted = hasMountedDesktopSidebar && !isWorkspaceFocusModeEnabled;
@@ -548,8 +561,12 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   if (isWeb) {
     themedSidebarChrome = <AppearanceStyleBoundary>{sidebarChrome}</AppearanceStyleBoundary>;
   }
+  const workspaceChromeStyle = useMemo(
+    () => [rowStyle, !isCompactLayout && { paddingLeft: insets.left, paddingRight: insets.right }],
+    [insets.left, insets.right, isCompactLayout],
+  );
   const workspaceChrome = (
-    <View style={rowStyle}>
+    <View style={workspaceChromeStyle} onTouchStart={(e) => console.log("DUO_INPUT", e.nativeEvent.pageX, e.nativeEvent.pageY)}>
       <WorkspaceLayoutModePublisher />
       {!isCompactLayout ? (
         <WindowChromeRegion corners={appChromeLayout.sidebarCorners}>
@@ -557,10 +574,7 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
         </WindowChromeRegion>
       ) : null}
       {usesCompactExplorerHost ? (
-        <CompactExplorerSidebarHost
-          enabled={chromeEnabled}
-          presentation={explorerSidebarPresentation === "dock" ? "dock" : "overlay"}
-        >
+        <CompactExplorerSidebarHost enabled={chromeEnabled}>
           <WindowChromeRegion corners={chromeEnabled ? "both" : appChromeLayout.contentCorners}>
             <View style={flexStyle}>{children}</View>
           </WindowChromeRegion>

@@ -13,6 +13,7 @@ import { usePanelStore } from "@/stores/panel-store";
 import {
   collectAllTabs,
   findPaneById,
+  selectExplorerSidebarPaneId,
   useWorkspaceLayoutStore,
 } from "@/stores/workspace-layout-store";
 import {
@@ -24,6 +25,14 @@ import {
 
 const WORKSPACE_KEY = "server-1:workspace-1";
 const CHECKOUT = { serverId: "server-1", cwd: "/tmp/repo", isGit: true };
+
+function activeExplorerKind() {
+  const state = useWorkspaceLayoutStore.getState();
+  const layout = state.layoutByWorkspace[WORKSPACE_KEY];
+  const paneId = selectExplorerSidebarPaneId(state, WORKSPACE_KEY);
+  const pane = paneId ? findPaneById(layout.root, paneId) : null;
+  return collectAllTabs(layout.root).find((tab) => tab.tabId === pane?.focusedTabId)?.target.kind;
+}
 
 beforeEach(() => {
   usePanelStore.setState({
@@ -50,7 +59,7 @@ describe("openWorkspaceChanges", () => {
     });
 
     expect(usePanelStore.getState().mobilePanel.target).toBe("file-explorer");
-    expect(usePanelStore.getState().explorerTab).toBe("changes");
+    expect(activeExplorerKind()).toBe("changes_tree");
   });
 });
 
@@ -109,8 +118,7 @@ describe("openComposerChanges", () => {
     openComposerChanges({ ...input, isCompact: true });
 
     expect(usePanelStore.getState().mobilePanel.target).toBe("file-explorer");
-    expect(usePanelStore.getState().explorerTab).toBe("changes");
-    expect(useWorkspaceLayoutStore.getState().layoutByWorkspace[WORKSPACE_KEY]).toBeUndefined();
+    expect(activeExplorerKind()).toBe("changes_tree");
   });
 });
 
@@ -128,8 +136,7 @@ describe("openWorkspacePullRequest", () => {
       openWorkspacePullRequest({ ...input, isCompact: true, destination });
 
       expect(usePanelStore.getState().mobilePanel.target).toBe("file-explorer");
-      expect(usePanelStore.getState().explorerTab).toBe("pr");
-      expect(useWorkspaceLayoutStore.getState().layoutByWorkspace[WORKSPACE_KEY]).toBeUndefined();
+      expect(activeExplorerKind()).toBe("pull_request");
     },
   );
 

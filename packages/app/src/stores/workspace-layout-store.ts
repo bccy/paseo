@@ -1036,12 +1036,15 @@ export function createWorkspaceLayoutStore(
             normalizedWorkspaceKey,
             input.parentTabId,
           );
-          const sheetPlacement = resolveSheetPlacement(
-            get(),
-            normalizedWorkspaceKey,
-            normalizedTarget,
-            input.intent,
-          );
+          const sheetPlacement =
+            input.placement?.mode === "pane"
+              ? null
+              : resolveSheetPlacement(
+                  get(),
+                  normalizedWorkspaceKey,
+                  normalizedTarget,
+                  input.intent,
+                );
           if (sheetPlacement) {
             const sheets = getSheets(get(), normalizedWorkspaceKey);
             const { keptIndex } = sheetPlacement;

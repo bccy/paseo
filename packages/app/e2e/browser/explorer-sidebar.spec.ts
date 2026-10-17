@@ -247,3 +247,43 @@ test("agents can still be dragged into Explorer when absent from its + menu", as
     await workspace.cleanup();
   }
 });
+
+test("tablet prototype keeps Explorer tabs when resizing down to a phone", async ({
+  page,
+}, testInfo) => {
+  const workspace = await seedWorkspace({ repoPrefix: "tablet-explorer-" });
+  try {
+    await page.setViewportSize({ width: 951, height: 669 });
+    await gotoWorkspace(page, workspace.workspaceId);
+    await waitForWorkspaceTabsVisible(page);
+    await ensureExplorerSidebar(page);
+    await expect(
+      explorerSidebar(page).getByRole("button", { name: "Browse workspace files", exact: true }),
+    ).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("tablet-951.png") });
+    await openExplorerAgentDraft(page);
+    await page.screenshot({ path: testInfo.outputPath("tablet-agent-draft.png") });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await revealPhoneExplorer(page);
+    await expect(
+      explorerSidebar(page).getByRole("button", { name: "New tab", exact: true }),
+    ).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("phone-shared-explorer.png") });
+  } finally {
+    await workspace.cleanup();
+  }
+});
+
+async function openExplorerAgentDraft(page: Parameters<typeof ensureExplorerSidebar>[0]) {
+  await explorerSidebar(page).getByRole("button", { name: "New tab", exact: true }).click();
+  await page.getByRole("menuitem", { name: /^Agent/ }).click();
+  await expect(explorerSidebar(page).getByRole("textbox").first()).toBeVisible();
+}
+
+async function revealPhoneExplorer(page: Parameters<typeof ensureExplorerSidebar>[0]) {
+  await page.getByRole("button", { name: "Open Explorer sidebar", exact: true }).click();
+  await expect(explorerSidebar(page)).toBeVisible();
+  await expect(
+    explorerSidebar(page).getByRole("button", { name: "Close Explorer sidebar", exact: true }),
+  ).toBeInViewport({ ratio: 1 });
+}

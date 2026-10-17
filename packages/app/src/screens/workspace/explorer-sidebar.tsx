@@ -1,5 +1,6 @@
 import { useCallback, useMemo, type ReactNode } from "react";
 import { View } from "react-native";
+import { isWeb } from "@/constants/platform";
 import { StyleSheet } from "react-native-unistyles";
 import { RetainedPanel } from "@/components/retained-panel";
 import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
@@ -144,7 +145,7 @@ export function ExplorerSidebarDock({
                 onCloseOtherTabs={handleCloseOtherTabs}
                 focusModeEnabled={false}
                 onExitFocusMode={onExitFocusMode}
-                externalDndContext
+                externalDndContext={isWeb}
                 paneId={pane.id}
                 tabs={tabItems}
                 normalizedServerId={normalizedServerId}

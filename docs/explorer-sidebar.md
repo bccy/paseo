@@ -61,7 +61,7 @@ workspace, including the header. It has its own persisted width and resize handl
 never read or modify that width.
 
 `packages/app/src/workspace-tabs/open-supporting-view.ts` owns semantic Changes and pull-request
-opens. Compact and wide native layouts select the matching Explorer tab. Desktop Changes opens
+opens. Compact and wide native layouts select the matching workspace tab in Explorer. Desktop Changes opens
 follow the shared diff preference. Desktop pull requests use their Main panel, On the side, or
 Explorer sidebar setting. Automatic PR discovery follows that preference once per workspace without
 interrupting the user's work. Closing the tab opts that workspace out of future automatic opens,
@@ -76,18 +76,25 @@ literal `"explorer"` pane id and `explorerPaneIdByWorkspace` key for compatibili
 
 Explorer uses the shared workspace tab row and ordinary tab context menus. Files and Changes
 hide their close buttons through the panel manifest; close them from the tab context menu.
-Other tabs reveal the close control on hover. The + menu opens compatible panels in the dock and
-omits Agent and terminal profiles. Agents and terminals can still be dragged into Explorer.
+Other tabs reveal the close control on hover. The + menu opens compatible panels in the dock, including Agent and terminal profiles.
+Web also supports dragging agents and terminals into Explorer.
 Bulk-close actions apply only to the dock's tabs. Explorer tabs can be reordered and dragged
 between compatible panes, but the dock cannot be split or maximized. Selecting an Explorer tab
 does not change workspace focus.
 
-Cmd+E shows or hides Explorer without changing its selected view. Compact layouts use the combined
-full-screen Explorer overlay for Changes, Files, and pull requests, and close it after a file opens. Compact Changes has no tree rail; its overview is the Jump to file action (`packages/app/src/git/jump-to-file/`), a sheet over the same changed-files tree the desktop rail renders.
-Wide native layouts without pane splits use the same combined content in a resizable inline dock;
-opening a file leaves that dock visible. Both presentations keep their selection in the panel store
-and reuse the layout store's per-workspace Explorer width. They do not create a second Explorer
-lifecycle.
+Cmd+E shows or hides Explorer without changing its selected view. All layouts use the same
+workspace tabs, launcher, and panel host. Below 600 points the shell is the swipeable Explorer
+overlay; at 600 points and above it reserves width beside the workspace. Native docking keeps its
+touch resize handle. Full workspace splits remain a separate web-only capability.
+
+The dock reserves at least 240 points and the workspace 360. App navigation yields when it cannot
+share the remaining width with both. This keeps a portrait tablet from rendering three unusably
+narrow columns; widening restores navigation without changing its saved open state.
+
+Compact panel gestures own overlay visibility; the workspace layout owns its tab selection and
+contents on every platform. Explicit pane destinations bypass compact sheet placement, so choosing
+a panel in Explorer's + menu keeps it there. Ordinary compact file and subagent look-ups still use
+the sheet policy.
 
 ## Side pane
 

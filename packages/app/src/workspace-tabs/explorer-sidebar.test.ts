@@ -50,7 +50,7 @@ describe("Explorer sidebar", () => {
     );
   });
 
-  it("uses the compact explorer without creating a desktop pane", () => {
+  it("uses the same Explorer pane inside the compact overlay", () => {
     openExplorerSidebarView({
       isCompact: true,
       workspaceKey: WORKSPACE_KEY,
@@ -59,7 +59,12 @@ describe("Explorer sidebar", () => {
     });
 
     expect(usePanelStore.getState().mobilePanel.target).toBe("file-explorer");
-    expect(useWorkspaceLayoutStore.getState().layoutByWorkspace[WORKSPACE_KEY]).toBeUndefined();
+    const state = useWorkspaceLayoutStore.getState();
+    const layout = state.layoutByWorkspace[WORKSPACE_KEY];
+    const pane = findPaneById(layout.root, selectExplorerSidebarPaneId(state, WORKSPACE_KEY)!);
+    expect(
+      collectAllTabs(layout.root).find((tab) => tab.tabId === pane?.focusedTabId)?.target.kind,
+    ).toBe("changes_tree");
   });
 
   it("creates a dedicated desktop Explorer containing only its requested tree", () => {
