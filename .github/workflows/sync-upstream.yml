@@ -1,0 +1,106 @@
+# 自动跟随上游 getpaseo/paseo 的 main，把更新合并进本 fork 的 main。
+# 每天 02:00 UTC（北京时间 10:00）跑一次，也可在 Actions 页手动触发。
+# 能干净合并时直接推送 main；有冲突时不改 main，改推 sync/upstream 分支并开 PR 等人工处理。
+# 注意：GitHub 会在仓库连续 60 天无活动后停掉定时 workflow，需要的话手动 Run workflow 一次即可续期。
+
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/getpaseo/paseo.git
+          git fetch upstream main
+          echo "upstream=$(git rev-parse --short upstream/main)" >> "$GITHUB_ENV"
+
+      - name: Check if up to date
+        id: check
+        run: |
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "up_to_date=true" >> "$GITHUB_OUTPUT"
+            echo "已经是最新：HEAD 包含 $upstream"
+          else
+            echo "up_to_date=false" >> "$GITHUB_OUTPUT"
+            echo "落后上游：$(git rev-list --count HEAD..upstream/main) 个 commit"
+          fi
+
+      - name: Merge upstream into main
+        if: steps.check.outputs.up_to_date == 'false'
+        id: merge
+        run: |
+          if git merge --no-edit upstream/main; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            git merge --abort || true
+          fi
+
+      - name: Push main
+        if: steps.check.outputs.up_to_date == 'false' && steps.merge.outputs.clean == 'true'
+        run: |
+          git push origin main
+          echo "main 已更新到 $upstream"
+
+      - name: Publish conflict branch
+        if: steps.check.outputs.up_to_date == 'false' && steps.merge.outputs.clean == 'false'
+        run: |
+          set -euo pipefail
+          BRANCH=sync/upstream
+          git checkout -B "$BRANCH"
+          git merge --no-edit upstream/main || true
+          # 冲突时保留可复现状态：提交冲突标记后推分支，由人解决
+          git add -A
+          git commit -m "chore(sync): merge upstream ${upstream} (conflicts need resolution)" || true
+          git push origin "$BRANCH" --force
+
+      - name: Open or update PR for conflicts
+        if: steps.check.outputs.up_to_date == 'false' && steps.merge.outputs.clean == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BODY="自动同步上游 getpaseo/paseo 时出现冲突（upstream ${upstream}）。请在本分支解决冲突后合入 main。"
+          if gh pr view sync/upstream -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh pr comment sync/upstream -R "$GITHUB_REPOSITORY" --body "$BODY"
+          else
+            gh pr create -R "$GITHUB_REPOSITORY" \
+              --base main --head sync/upstream \
+              --title "sync: 上游 ${upstream} 需要手动解决冲突" \
+              --body "$BODY"
+          fi
+
+      - name: Summary
+        run: |
+          {
+            echo "### Sync upstream"
+            echo ""
+            echo "- upstream: \`${upstream}\`"
+            echo "- 最新: ${{ steps.check.outputs.up_to_date }}"
+            echo "- 干净合并: ${{ steps.merge.outputs.clean || 'n/a' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
