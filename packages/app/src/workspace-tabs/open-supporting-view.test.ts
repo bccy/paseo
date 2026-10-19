@@ -24,7 +24,6 @@ import {
 } from "@/workspace-tabs/open-supporting-view";
 
 const WORKSPACE_KEY = "server-1:workspace-1";
-const CHECKOUT = { serverId: "server-1", cwd: "/tmp/repo", isGit: true };
 
 function activeExplorerKind() {
   const state = useWorkspaceLayoutStore.getState();
@@ -37,10 +36,10 @@ function activeExplorerKind() {
 beforeEach(() => {
   usePanelStore.setState({
     mobilePanel: { target: "agent", revision: 0 },
-    explorerTab: "files",
-    explorerTabByCheckout: {},
   });
   useWorkspaceLayoutStore.setState({
+    layoutMode: "split-panes",
+    sheetsByWorkspace: {},
     pullRequestTabAutoOpenedByWorkspace: {},
     layoutByWorkspace: {},
     explorerSidebarPaneIdByWorkspace: {},
@@ -51,10 +50,10 @@ beforeEach(() => {
 
 describe("openWorkspaceChanges", () => {
   it("opens Changes in the compact Explorer", () => {
+    useWorkspaceLayoutStore.getState().setLayoutMode("compact");
     openWorkspaceChanges({
       isCompact: true,
       workspaceKey: WORKSPACE_KEY,
-      checkout: CHECKOUT,
       preferences: DEFAULT_APP_SETTINGS.openInSidePane,
     });
 
@@ -68,7 +67,6 @@ describe("openComposerChanges", () => {
     isCompact: false,
     supportsPaneSplits: true,
     workspaceKey: WORKSPACE_KEY,
-    checkout: CHECKOUT,
     preferences: DEFAULT_APP_SETTINGS.openInSidePane,
   };
 
@@ -114,6 +112,7 @@ describe("openComposerChanges", () => {
   });
 
   it("keeps opening the compact Explorer on Changes", () => {
+    useWorkspaceLayoutStore.getState().setLayoutMode("compact");
     openComposerChanges({ ...input, isCompact: true });
     openComposerChanges({ ...input, isCompact: true });
 
@@ -127,12 +126,12 @@ describe("openWorkspacePullRequest", () => {
     isCompact: false,
     supportsPaneSplits: true,
     workspaceKey: WORKSPACE_KEY,
-    checkout: CHECKOUT,
   };
 
   it.each(["main", "side", "explorer"] as const)(
     "opens the compact PR view in Explorer when the desktop preference is %s",
     (destination) => {
+      useWorkspaceLayoutStore.getState().setLayoutMode("compact");
       openWorkspacePullRequest({ ...input, isCompact: true, destination });
 
       expect(usePanelStore.getState().mobilePanel.target).toBe("file-explorer");

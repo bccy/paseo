@@ -32,7 +32,7 @@ function CompactExplorerOpenGestureSurface({
   );
 }
 
-export function CompactExplorerSidebarHost({
+export function WorkspaceExplorerOpenGesture({
   children,
   enabled,
 }: {
@@ -46,7 +46,6 @@ export function CompactExplorerSidebarHost({
     showExplorerSidebar({
       isCompact: true,
       workspaceKey: `${selection.serverId}:${selection.workspaceId}`,
-      checkout: null,
     });
   }, [selection, workspace]);
   return (

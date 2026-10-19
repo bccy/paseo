@@ -89,8 +89,9 @@ export function WorkspaceHeaderExplorerToggle({
 }
 
 export function WorkspaceExplorerSidebarToggle({
-  owner: _owner,
+  owner,
   ...toggleProps
 }: DesktopWorkspaceExplorerToggleProps) {
+  if (owner === "header") return null;
   return <WorkspaceExplorerToggle {...toggleProps} mobile={false} />;
 }
