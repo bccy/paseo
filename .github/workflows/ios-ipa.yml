@@ -62,9 +62,19 @@ jobs:
         run: |
           set -euo pipefail
           WORKSPACE=$(ls -d ios/*.xcworkspace | head -1)
-          SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list -json \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["workspace"]["schemes"][0])')
-          echo "workspace=$WORKSPACE scheme=$SCHEME"
+          PROJECT=$(ls -d ios/*.xcodeproj | head -1)
+          # 主 target 名 = 工程名。workspace 的 schemes 里排第一的是 Pods 的库（如 EXApplication），不能取 [0]。
+          SCHEME=$(basename "$PROJECT" .xcodeproj)
+          echo "workspace=$WORKSPACE project=$PROJECT"
+          echo "--- 可用 schemes ---"
+          xcodebuild -workspace "$WORKSPACE" -list -json \
+            | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["workspace"]["schemes"]))' \
+            | tee /tmp/schemes.txt
+          if ! grep -qx "$SCHEME" /tmp/schemes.txt; then
+            echo "::error::主 target $SCHEME 不在 schemes 列表里，拒绝继续"
+            exit 1
+          fi
+          echo "scheme=$SCHEME"
           xcodebuild build \
             -workspace "$WORKSPACE" -scheme "$SCHEME" \
             -configuration Release -sdk iphoneos \
@@ -77,10 +87,15 @@ jobs:
         working-directory: packages/app
         run: |
           set -euo pipefail
-          APP=$(find build/Build/Products -maxdepth 2 -name '*.app' -type d | head -1)
+          APP=$(find build/Build/Products -maxdepth 3 -name '*.app' -type d | head -1)
+          if [ -z "$APP" ]; then
+            echo "::error::找不到 .app 产物，Products 目录内容："
+            find build/Build/Products -maxdepth 2 | head -40
+            exit 1
+          fi
           echo "app=$APP"
           test -x "$APP/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")" \
-            || { echo "可执行文件缺失"; exit 1; }
+            || { echo "::error::可执行文件缺失"; exit 1; }
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist"
           rm -rf Payload Paseo-unsigned.ipa
           mkdir -p Payload
