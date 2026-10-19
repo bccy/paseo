@@ -37,9 +37,8 @@ beforeEach(() => {
 });
 
 describe("Explorer sidebar", () => {
-  it("selects the Explorer shell from layout and split capabilities", () => {
+  it("selects the Explorer shell from the form factor", () => {
     expect(resolveExplorerSidebarPresentation({ isCompact: true })).toBe("overlay");
-    expect(resolveExplorerSidebarPresentation({ isCompact: false })).toBe("dock");
     expect(resolveExplorerSidebarPresentation({ isCompact: false })).toBe("dock");
   });
 

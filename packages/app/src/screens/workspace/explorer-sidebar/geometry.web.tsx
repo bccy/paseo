@@ -53,5 +53,5 @@ export function useExplorerGeometry({
   };
 }
 const styles = StyleSheet.create({
-  resize: { position: "absolute", left: 0, top: 0, bottom: 0, zIndex: 2 },
+  resize: { position: "absolute", left: 0, top: 0, bottom: 0, zIndex: 2, flexDirection: "row" },
 });

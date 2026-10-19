@@ -55,7 +55,6 @@ import {
 } from "@/stores/workspace-layout-store";
 import type { WorkspaceTab } from "@/workspace-tabs/model";
 import { recordRenderProfileReasons, RenderProfile } from "@/utils/render-profiler";
-import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { isNative } from "@/constants/platform";
 
 interface SplitContainerProps {
