@@ -131,11 +131,15 @@ const test = daemonTest.extend<{
       });
 
       // Expo's development LogBox toast overlaps bottom actions on compact screens.
-      // Dismiss its UI through the close button; console errors still go into the test log.
+      // Dispatch the developer UI's close action without moving the pointer or
+      // clicking through an app modal. Console errors still go into the test log.
       const dismissDevToast = page
         .locator("#error-toast")
         .getByRole("button", { name: "", exact: true });
-      await page.addLocatorHandler(dismissDevToast, () => dismissDevToast.click());
+      await page.addLocatorHandler(dismissDevToast, () => dismissDevToast.dispatchEvent("click"), {
+        // Another logged error can replace the toast before it disappears.
+        noWaitAfter: true,
+      });
 
       const entries: string[] = [];
 
