@@ -316,6 +316,10 @@ function AttachmentDropdown({
   );
 }
 
+// Local fork tweak: hide the voice/dictation button at the composer's bottom-right.
+// Upstream behaviour is unchanged when this is flipped back to true.
+const SHOW_VOICE_BUTTON = false;
+
 function VoiceButtonIcon({
   hovered,
   isDictating,
@@ -2068,7 +2072,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
           <View style={styles.rightButtonGroup}>
             {beforeVoiceContent}
             <VoiceButtonTooltip
-              visible={mode.showVoice}
+              visible={SHOW_VOICE_BUTTON && mode.showVoice}
               onVoicePress={handleVoicePress}
               isDictationStartEnabled={isDictationStartEnabled}
               voiceButtonAccessibilityLabel={voiceButtonAccessibilityLabel}
