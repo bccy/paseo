@@ -1,4 +1,3 @@
-/** @vitest-environment jsdom */
 import { act, useLayoutEffect, useState, useSyncExternalStore } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it } from "vitest";

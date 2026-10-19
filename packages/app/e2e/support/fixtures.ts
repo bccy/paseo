@@ -130,6 +130,13 @@ const test = daemonTest.extend<{
         await ws.close({ code: 1008, reason: "Blocked connection to localhost:6767 during e2e." });
       });
 
+      // Expo's development LogBox toast overlaps bottom actions on compact screens.
+      // Dismiss its UI through the close button; console errors still go into the test log.
+      const dismissDevToast = page
+        .locator("#error-toast")
+        .getByRole("button", { name: "", exact: true });
+      await page.addLocatorHandler(dismissDevToast, () => dismissDevToast.click());
+
       const entries: string[] = [];
 
       page.on("console", (message) => {

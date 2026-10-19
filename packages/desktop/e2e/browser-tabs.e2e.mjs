@@ -1173,6 +1173,7 @@ async function main() {
         cwd: rootDir,
         env: {
           ...commonEnv,
+          EXPO_UNSTABLE_HEADLESS: "1",
           EXPO_PORT: String(expoPort),
           EXPO_DEV_URL: `http://localhost:${expoPort}`,
           PASEO_ELECTRON_REMOTE_DEBUGGING_PORT: String(cdpPort),
