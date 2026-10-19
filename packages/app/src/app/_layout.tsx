@@ -679,10 +679,15 @@ function MobileGestureWrapper({
   chromeEnabled: boolean;
 }) {
   const openGesture = useOpenAgentListGesture(chromeEnabled);
+  const isCompactLayout = useIsCompactFormFactor();
 
   return (
     <GestureDetector gesture={openGesture} touchAction={MOBILE_WEB_GESTURE_TOUCH_ACTION}>
-      <View collapsable={false} style={layoutStyles.surfaceFill} testID="compact-shell">
+      <View
+        collapsable={false}
+        style={layoutStyles.surfaceFill}
+        testID={isCompactLayout ? "compact-shell" : "wide-shell"}
+      >
         {children}
       </View>
     </GestureDetector>
