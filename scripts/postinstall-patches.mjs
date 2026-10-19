@@ -48,6 +48,13 @@ const patchedPackages = [
     patchPrefix: "@opencode-ai+sdk+",
     cwd: "packages/server",
   },
+  // iOS 27.1 raises NSInvalidArgumentException from canLoadObject(ofClass: PHLivePhoto.self);
+  // check mediaTypes first so the provider is not queried when live photos were not requested.
+  // Upstream fix: https://github.com/expo/expo/pull/50435 (only shipped in SDK 58).
+  {
+    nodeModulesPath: "node_modules/expo-image-picker",
+    patchPrefix: "expo-image-picker+",
+  },
 ];
 
 const installedPackages = patchedPackages.filter(({ nodeModulesPath }) =>
