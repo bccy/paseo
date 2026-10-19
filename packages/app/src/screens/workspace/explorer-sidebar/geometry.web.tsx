@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { View, StyleSheet } from "react-native";
+import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { ResizeHandle } from "@/components/resize-handle";
 import {
   resolveExplorerSidebarDockSizes,
@@ -33,7 +34,7 @@ export function useExplorerGeometry({
     [containerWidth, onResize],
   );
   return {
-    frameStyle: { width: overlay ? undefined : requestedWidth },
+    frameStyle: inlineUnistylesStyle({ width: overlay ? undefined : requestedWidth }),
     panelStyle: undefined,
     resizeHandle: (
       <View style={styles.resize}>
