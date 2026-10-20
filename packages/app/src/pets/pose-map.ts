@@ -14,11 +14,12 @@
  * is allowed to replace an idle pose.
  *
  * Priority (see `resolveOverlayPose`): a tap or a drag always wins (direct
- * interaction), then the state machine's own pose. Only when that pose is an
- * idle-series one (`idle-cute` / `afk` / `sleep`) may the tool / keyword /
- * celebration / idle-random layers swap in a different standee, so decoration
- * can never hide `running`, `thinking`, `failure`, `success`, `waiting` or
- * `curious`.
+ * interaction), then the state machine's own pose. The **tool layer** may
+ * refine that pose when it is `running` (a tool is executing, so the tool name
+ * picks the work-* standee) or an idle-series one (`idle-cute` / `afk` /
+ * `sleep`). The keyword / celebration / idle-random decoration layers stay
+ * idle-only: they can never hide `running`, `thinking`, `failure`, `success`,
+ * `waiting` or `curious`.
  *
  * Every one of the 79 standees has at least one reachable path; the table of
  * paths lives in the task report (asserted by a throwaway coverage script).
@@ -310,7 +311,16 @@ export interface OverlayPoseContext {
   /** A drag is in progress (or just ended). */
   dragging: boolean;
   pat: { pose: PoseName; until: number } | null;
+  /**
+   * The tool executing *right now* (its status is still `running`). Only the
+   * `running` branch reads it, and it has no recency window.
+   */
   tool: { pose: PoseName | null; at: number } | null;
+  /**
+   * The newest tool call of *any* status. Only the idle-series branch reads it,
+   * through the 60s "she just finished this" window.
+   */
+  recentTool: { pose: PoseName | null; at: number } | null;
   keyword: { pose: PoseName; at: number } | null;
   celebration: { pose: PoseName; at: number } | null;
   /** Latest idle-variety pick, cleared by any interaction. */
@@ -320,31 +330,65 @@ export interface OverlayPoseContext {
 /**
  * Resolve the standee to draw for this tick.
  *
- * Order, most binding first:
- *   - a pat or a drag (the user just touched her, that is the answer);
- *   - the state machine's pose, unless it is idle-series — `running`,
- *     `thinking`, `failure`, `success`, `waiting` and `curious` are never
- *     overwritten (the renderer feeds `thinking` as a signal of its own, so
- *     computeState picks the thinking standee while a thought is streaming);
- *   - while idle: a recent tool call (work-*), then a recent user message
- *     (keyword or random meme), then a recently completed todo step
- *     (celebration), then the 3-5 minute idle variety pick;
- *   - finally the quiet fallbacks: `afk` at night becomes `sleep`, and
- *     `idle-cute` at night becomes `night`.
+ * Priority table, most binding first:
+ *
+ * | computeState pose                                  | tool layer (work-*) | keyword / celebration / idle-random |
+ * |----------------------------------------------------|---------------------|--------------------------------------|
+ * | (a pat or a drag)                                  | wins over everything (direct input) |         |
+ * | `running`                                          | MAY refine (`tool`)  | never                                |
+ * | `idle-cute` / `afk` / `sleep`                      | MAY refine (`recentTool`) | MAY replace                     |
+ * | `failure` / `success` / `waiting` / `curious` / `thinking` / anything else | never | never        |
+ *
+ * `running` is the only non-idle pose the tool layer may refine. A tool call is
+ * executing and `computeState` can only say "running" generically, so the tool
+ * name is exactly the extra information a standee should show — the user asked
+ * for a different standee per tool while working.
+ *
+ * The tool layer takes two separate inputs so each branch gets the right data:
+ *   - `tool` is the call executing *right now*; the caller only fills it while
+ *     the call's status is still `running`. No recency window: the timestamp is
+ *     the start of the call and a command / build / install may legitimately run
+ *     for minutes, so a 60s window would flip the standee back to the generic
+ *     `running` mid-execution.
+ *   - `recentTool` is the newest call of *any* status (completed / failed too).
+ *     The idle branch reads it through the 60s window, which is the
+ *     "she just did this, show it for a moment" recency after the turn ended.
+ *     Its timestamp must come from a call that has already finished; feeding the
+ *     running tool here is what used to make that idle standee unreachable.
+ *
+ * The keyword / celebration / idle-random sources stay idle-only on purpose:
+ * they are ambient decoration, and a meme / celebration / daily standee must
+ * never hide the generic running pose or any critical state
+ * (`failure` / `success` / `waiting` / `curious` / `thinking`).
  */
 export function resolveOverlayPose(context: OverlayPoseContext): PoseName {
   const { now } = context;
 
+  // Direct interaction answers immediately, whatever the state machine says.
   if (context.dragging) return PICK_UP_POSE;
   if (context.pat !== null && now < context.pat.until) return context.pat.pose;
 
   const statePose = normalizeStatePose(context.statePose);
+
+  // `running`: a tool is executing right now, so the standee must stay
+  // tool-specific for the whole execution — even a multi-minute bash / build /
+  // install. No recency window: `tool.at` is the start of the call, not the last
+  // activity.
+  if (statePose === "running") {
+    const tool = context.tool;
+    return tool !== null && tool.pose !== null ? tool.pose : "running";
+  }
   if (!isIdleSeriesPose(statePose)) return statePose;
 
-  const tool = context.tool;
-  if (tool !== null && tool.pose !== null && now - tool.at <= TOOL_POSE_WINDOW_MS) {
-    return tool.pose;
-  }
+  // idle series: the tool has already finished. `recentTool` is the newest call
+  // of any status, and the 60s window makes the tool standee show for a moment
+  // after the work is done, then the idol pose returns.
+  const recentTool = context.recentTool;
+  const recentToolPose =
+    recentTool !== null && recentTool.pose !== null && now - recentTool.at <= TOOL_POSE_WINDOW_MS
+      ? recentTool.pose
+      : null;
+  if (recentToolPose !== null) return recentToolPose;
   if (context.keyword !== null && now - context.keyword.at <= KEYWORD_POSE_WINDOW_MS) {
     return context.keyword.pose;
   }
