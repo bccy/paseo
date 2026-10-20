@@ -14,11 +14,13 @@
  * is allowed to replace an idle pose.
  *
  * Priority (see `resolveOverlayPose`): a tap or a drag always wins (direct
- * interaction), then the state machine's own pose. Only when that pose is an
- * idle-series one (`idle-cute` / `afk` / `sleep`) may the tool / keyword /
- * celebration / idle-random layers swap in a different standee, so decoration
- * can never hide `running`, `thinking`, `failure`, `success`, `waiting` or
- * `curious`.
+ * interaction), then the state machine's own pose. Two layers may replace it:
+ *   - the tool layer refines `running` (work-* for the tool that is running, or
+ *     the one that just finished) because `computeState` can only say "running"
+ *     generically while the agent works;
+ *   - while idle (`idle-cute` / `afk` / `sleep`) the tool / keyword /
+ *     celebration / idle-random layers may swap in a different standee.
+ * `thinking`, `failure`, `success`, `waiting` and `curious` are never replaced.
  *
  * Every one of the 79 standees has at least one reachable path; the table of
  * paths lives in the task report (asserted by a throwaway coverage script).
@@ -181,8 +183,41 @@ export const TOOL_POSE_RULES: readonly ToolPoseRule[] = [
   { pattern: /bash|shell|exec|command|terminal|npm|pnpm|yarn|git|node|python/i, pose: "work-slack-phone" },
 ];
 
-export function resolveToolPose(toolName: string | null): PoseName | null {
+/**
+ * Command text (the `command` field of a `shell` tool-call detail) -> standee.
+ *
+ * Some standees are only reachable through what a shell tool actually runs:
+ * `sweep` (lint / clean / format) and `work-deploy` (git push / deploy /
+ * publish) never appear in the 161 real tool names the audit collected. Only
+ * shell details carry a command, so this layer simply does not apply to other
+ * tool kinds.
+ */
+export const COMMAND_POSE_RULES: readonly ToolPoseRule[] = [
+  { pattern: /\b(?:git\s+push|git\s+tag\s+-d|deploy|deployment|publish|release|ship)\b/i, pose: "work-deploy" },
+  { pattern: /\b(?:clean|lint|linting|format|fmt|prettier|eslint|stylelint|clang-format|goimports)\b/i, pose: "sweep" },
+];
+
+/**
+ * Map a tool call onto a standee.
+ *
+ * `toolName` is the provider tool name; `commandText` is the shell command the
+ * call ran (`null` for non-shell tools or when the detail is unavailable — the
+ * caller degrades to name-only matching instead of failing).
+ *
+ * Order: command text first (a `bash` call running `git push` is a deploy, not
+ * generic shell), then the tool-name table, then the generic `tool` standee.
+ */
+export function resolveToolPose(
+  toolName: string | null,
+  commandText: string | null = null,
+): PoseName | null {
   if (toolName === null) return null;
+  if (commandText !== null) {
+    const command = commandText.toLowerCase();
+    for (const rule of COMMAND_POSE_RULES) {
+      if (rule.pattern.test(command)) return rule.pose;
+    }
+  }
   const name = toolName.toLowerCase();
   for (const rule of TOOL_POSE_RULES) {
     if (rule.pattern.test(name)) return rule.pose;
@@ -270,9 +305,15 @@ export const PICK_UP_HOLD_MS = 600;
 export const TOOL_POSE_WINDOW_MS = 60000;
 export const KEYWORD_POSE_WINDOW_MS = 120000;
 export const CELEBRATION_WINDOW_MS = 120000;
-/** Idle variety cadence. */
+/** Idle variety cadence and hold time. */
 export const IDLE_RANDOM_MIN_MS = 180000;
 export const IDLE_RANDOM_MAX_MS = 300000;
+/**
+ * How long one idle-variety pick stays up. After this the standee falls back to
+ * the quiet poses (`afk` / night `sleep`), otherwise a single pick would hide
+ * them until the next 3-5 minute draw.
+ */
+export const IDLE_RANDOM_HOLD_MS = 60000;
 
 export function pickPatPose(isWorking: boolean, rng: () => number = Math.random): PoseName {
   if (isWorking) return WORKING_PAT_POSE;
@@ -310,7 +351,10 @@ export interface OverlayPoseContext {
   /** A drag is in progress (or just ended). */
   dragging: boolean;
   pat: { pose: PoseName; until: number } | null;
+  /** The tool executing right now (`status: "running"`); no recency window. */
   tool: { pose: PoseName | null; at: number } | null;
+  /** The newest tool call of any status, used through the 60s windows. */
+  recentTool: { pose: PoseName | null; at: number } | null;
   keyword: { pose: PoseName; at: number } | null;
   celebration: { pose: PoseName; at: number } | null;
   /** Latest idle-variety pick, cleared by any interaction. */
@@ -320,38 +364,62 @@ export interface OverlayPoseContext {
 /**
  * Resolve the standee to draw for this tick.
  *
- * Order, most binding first:
- *   - a pat or a drag (the user just touched her, that is the answer);
- *   - the state machine's pose, unless it is idle-series — `running`,
- *     `thinking`, `failure`, `success`, `waiting` and `curious` are never
- *     overwritten (the renderer feeds `thinking` as a signal of its own, so
- *     computeState picks the thinking standee while a thought is streaming);
- *   - while idle: a recent tool call (work-*), then a recent user message
- *     (keyword or random meme), then a recently completed todo step
- *     (celebration), then the 3-5 minute idle variety pick;
- *   - finally the quiet fallbacks: `afk` at night becomes `sleep`, and
- *     `idle-cute` at night becomes `night`.
+ * Priority, most binding first:
+ *
+ * | computeState pose                                  | tool layer (work-*)          | keyword / celebration / idle-random |
+ * |----------------------------------------------------|------------------------------|--------------------------------------|
+ * | (a pat or a drag)                                  | wins over everything (direct input) |                               |
+ * | `running`                                          | MAY refine: running tool -> recent tool (60s) -> generic `running` | never |
+ * | `idle-cute` / `afk` / `sleep`                      | MAY refine: recent tool (60s) | MAY replace (idleRandom for 60s)     |
+ * | `thinking` / `failure` / `success` / `waiting` / `curious` / anything else | never | never |
+ *
+ * `running` is refined because `computeState` can only say "running"
+ * generically; while the agent works the tool name is the useful information.
+ * The running tool has no recency window (a long build must keep its standee);
+ * when it finishes, the recent-tool window smooths the boundary so the standee
+ * does not flicker back to the generic `running` for a moment.
+ *
+ * `idleRandom` expires after IDLE_RANDOM_HOLD_MS so the quiet poses (`afk`, and
+ * `sleep` at night) are visible between the 3-5 minute draws.
  */
 export function resolveOverlayPose(context: OverlayPoseContext): PoseName {
   const { now } = context;
 
+  // Direct interaction answers immediately, whatever the state machine says.
   if (context.dragging) return PICK_UP_POSE;
   if (context.pat !== null && now < context.pat.until) return context.pat.pose;
 
   const statePose = normalizeStatePose(context.statePose);
+  const tool = context.tool;
+  const recentTool = context.recentTool;
+  const recentToolPose =
+    recentTool !== null &&
+    recentTool.pose !== null &&
+    now - recentTool.at <= TOOL_POSE_WINDOW_MS
+      ? recentTool.pose
+      : null;
+
+  // While working, the tool layer may refine the generic running standee.
+  if (statePose === "running") {
+    const runningPose = tool !== null && tool.pose !== null ? tool.pose : null;
+    return runningPose ?? recentToolPose ?? "running";
+  }
+  // Every other non-idle pose is protected from every decoration layer.
   if (!isIdleSeriesPose(statePose)) return statePose;
 
-  const tool = context.tool;
-  if (tool !== null && tool.pose !== null && now - tool.at <= TOOL_POSE_WINDOW_MS) {
-    return tool.pose;
-  }
+  if (recentToolPose !== null) return recentToolPose;
   if (context.keyword !== null && now - context.keyword.at <= KEYWORD_POSE_WINDOW_MS) {
     return context.keyword.pose;
   }
   if (context.celebration !== null && now - context.celebration.at <= CELEBRATION_WINDOW_MS) {
     return context.celebration.pose;
   }
-  if (context.idleRandom !== null) return context.idleRandom.pose;
+  if (
+    context.idleRandom !== null &&
+    now - context.idleRandom.pickedAt <= IDLE_RANDOM_HOLD_MS
+  ) {
+    return context.idleRandom.pose;
+  }
 
   if (statePose === "afk" || statePose === "sleep") {
     return isNightHour(context.hour) ? "sleep" : "afk";
