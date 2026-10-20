@@ -1,24 +1,6 @@
-Sprite atlas license
-====================
-
-This directory contains the "whale-refined" sprite atlas from
-@linxin666/dsh-pet v0.4.8 (https://www.npmjs.com/package/@linxin666/dsh-pet).
-
-Provenance
-----------
-- Source file: assets/whale-refined/spritesheet.webp in that package
-- Frame layout and timing: assets/whale-refined/pet.json (also in that package)
-- Redistributed here unmodified apart from the container format
-  (lossless WebP -> PNG, so the iOS asset pipeline needs no WebP decoder).
-
-License
--------
-The upstream asset manifest (assets/whale-refined/pet.json) declares this pet
-as MIT. The surrounding package declares Apache-2.0 for its own code; that
-applies to the code, not to this art asset.
-
 MIT License
------------
+
+Copyright (c) 2026 Sutera-Diffusus
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
