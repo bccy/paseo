@@ -38,6 +38,18 @@ import Animated, {
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useWorkspaceStatusesForBadges } from "@/stores/session-store-hooks";
+import { BubbleGame } from "../pets/bubble-game";
+import { CatchGame } from "../pets/catch-game";
+import { GrowthPanel, type AchievementEntry, type GrowthState } from "../pets/growth-panel";
+import { PetMenu, type PetMenuAction } from "../pets/pet-menu";
+import { SettingsPanel } from "../pets/settings-panel";
+import {
+  DEFAULT_SETTINGS,
+  loadPetSave,
+  savePetSave,
+  type PetSave,
+  type PetSettings,
+} from "../pets/pet-storage";
 
 // The upstream state machine is a UMD module with no DOM dependencies. Vendored
 // verbatim so its dialogue tables and rules stay byte-identical to the source
@@ -52,6 +64,16 @@ const core = require("../pets/whale-moe-core.js") as {
   ) => PetState;
   hitZone: (nx: number, ny: number, poseSet: "full" | "peek") => string;
   POSES: Record<string, string>;
+  ACHIEVEMENTS: readonly AchievementEntry[];
+  computeGrowth: (
+    prev: unknown,
+    event: { type: string },
+    now: number,
+    pats: number,
+  ) => { growth: GrowthState; unlocks: string[]; leveledUp: boolean };
+  computeWeekSignin: (growth: unknown) => {
+    weekSignin: { week: string; days: string[]; rewarded1: boolean; rewarded3: boolean; rewarded7: boolean };
+  };
 };
 
 /** The slice of `computeState`'s return value this renderer reads. */
@@ -230,6 +252,32 @@ export function PetOverlay() {
 
   const [petState, setPetState] = useState<PetState>(stateRef.current as PetState);
 
+  // ---- save + panels -------------------------------------------------------
+  // The save owns the five upstream preferences plus the opaque growth/game
+  // blobs; the panels below write back through `persistSave`.
+  const [save, setSave] = useState<PetSave | null>(null);
+  const saveRef = useRef<PetSave | null>(null);
+  const [panel, setPanel] = useState<"menu" | PetMenuAction | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadPetSave().then((loaded) => {
+      if (cancelled) return;
+      saveRef.current = loaded;
+      setSave(loaded);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const settings = save?.settings ?? DEFAULT_SETTINGS;
+  const persistSave = useCallback((next: PetSave) => {
+    saveRef.current = next;
+    setSave(next);
+    void savePetSave(next);
+  }, []);
+
   useEffect(() => {
     const timer = setInterval(() => {
       const next = core.computeState(stateRef.current, signalsRef.current, Date.now(), Math.random);
@@ -365,6 +413,17 @@ export function PetOverlay() {
     });
   }, []);
 
+  /** Record one growth interaction (mood/affinity) and persist it. */
+  const recordGrowth = useCallback(
+    (type: string) => {
+      const current = saveRef.current;
+      if (current === null) return;
+      const result = core.computeGrowth(current.growth, { type }, Date.now(), 1);
+      persistSave({ ...current, growth: result.growth });
+    },
+    [persistSave],
+  );
+
   /** Play wm-hop once. */
   const playHop = useCallback(() => {
     hop.value = 0;
@@ -381,7 +440,8 @@ export function PetOverlay() {
    */
   const react = useCallback(() => {
     playHop();
-  }, [playHop]);
+    recordGrowth("pat");
+  }, [playHop, recordGrowth]);
 
   const pan = useMemo(
     () =>
@@ -412,7 +472,24 @@ export function PetOverlay() {
 
   const tap = useMemo(() => Gesture.Tap().maxDistance(12).onEnd(() => runOnJS(react)()), [react]);
 
-  const gesture = useMemo(() => Gesture.Exclusive(pan, tap), [pan, tap]);
+  // Long-press opens the menu: phones have no right-click, which is what the
+  // upstream build binds its context menu to.
+  const longPress = useMemo(
+    () =>
+      Gesture.LongPress()
+        .minDuration(450)
+        .onStart(() => runOnJS(setPanel)("menu")),
+    [],
+  );
+
+  // Long-press must win over the tap, and a drag must not open the menu.
+  const gesture = useMemo(
+    () => Gesture.Exclusive(longPress, pan, tap),
+    [longPress, pan, tap],
+  );
+
+  /** Route a menu pick to the right sheet. */
+  const handleAction = useCallback((action: PetMenuAction) => setPanel(action), []);
 
   const petStyle = useAnimatedStyle(() => ({
     opacity: 0.2 + 0.8 * poseIn.value,
@@ -431,7 +508,9 @@ export function PetOverlay() {
   // unknown pose (a newer upstream mood) falls back to the idle standee.
   const standee = POSES[petState.pose as PoseName] ?? POSES["idle-cute"];
 
-  if (HIDDEN_ROUTES.has(pathname)) return null;
+  // `pet` is the upstream "show the pet at all" switch; turning it off is the
+  // whole hide mechanism, so honour it here rather than only in the settings UI.
+  if (HIDDEN_ROUTES.has(pathname) || !settings.pet) return null;
 
   return (
     // `box-none` keeps the rest of the screen interactive: only the pet cell
@@ -444,13 +523,38 @@ export function PetOverlay() {
           style={[styles.pet, petStyle]}
         >
           <Image source={standee} contentFit="contain" style={[styles.standee, styles.shadow]} />
-          {bubbleVisible && typed ? (
+          {bubbleVisible && typed && settings.chat ? (
             <View style={styles.bubble} pointerEvents="none">
               <Text style={styles.bubbleText}>{typed}</Text>
             </View>
           ) : null}
         </Animated.View>
       </GestureDetector>
+      <PetMenu
+        visible={panel === "menu"}
+        gamesEnabled={settings.game}
+        onAction={handleAction}
+        onClose={() => setPanel(null)}
+      />
+      <SettingsPanel
+        visible={panel === "settings"}
+        settings={settings}
+        onChange={(next: PetSettings) => {
+          const current = saveRef.current;
+          if (current === null) return;
+          persistSave({ ...current, settings: next });
+        }}
+        onClose={() => setPanel(null)}
+      />
+      <GrowthPanel
+        visible={panel === "growth"}
+        growth={(save?.growth as GrowthState | null) ?? null}
+        achievements={core.ACHIEVEMENTS}
+        weekSignin={save?.growth ? core.computeWeekSignin(save.growth).weekSignin : null}
+        onClose={() => setPanel(null)}
+      />
+      <BubbleGame visible={panel === "bubble-game"} onClose={() => setPanel(null)} />
+      <CatchGame visible={panel === "catch-game"} onClose={() => setPanel(null)} />
     </View>
   );
 }
