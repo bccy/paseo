@@ -3,10 +3,26 @@
  *
  * The behaviour is **not** reimplemented: `src/pets/whale-moe-core.js` is the
  * upstream state machine from `Sutera-Diffusus/dsh-whale-musume` (MIT), copied
- * verbatim because it is pure and DOM-free. It owns the dialogue tables (620
- * lines across 11 banks), the achievement rules, the growth model and the two
- * mini-games. This file is only the React Native renderer: it feeds that module
- * the host signals it needs and draws the `pose` and `line` it returns.
+ * verbatim because it is pure and DOM-free. It owns the dialogue tables and the
+ * state -> pose mapping. This file is only the React Native renderer: it feeds
+ * that module the host signals it needs, draws the pose it returns, and layers
+ * the host-only variety on top (see below).
+ *
+ * Scope is the automatic companion: no menu, no settings sheet, no growth
+ * panel, no mini-games. The product is the standee, the automatic dialogue, and
+ * the "different state -> different standee" link. That link is the state
+ * machine's `pose` field looked up in `POSE_ASSETS` — it stays, always.
+ *
+ * Variety (v3): all 79 usable standees are wired to a trigger. `pose-map.ts`
+ * owns the asset table and the mapping tables; `resolveOverlayPose` there
+ * decides priority. The layers are:
+ *   - the state machine's own pose (`running` / `thinking` / `failure` /
+ *     `success` / `waiting` / `curious` are never overwritten);
+ *   - a tap (whole standee is one button) or a drag — direct interaction;
+ *   - while idle only: a recent tool call picks a work-* standee, a recent user
+ *     message picks a keyword/meme standee, a completed todo step picks a
+ *     celebration standee, and every 3-5 minutes a daily-* / meme-* standee is
+ *     picked at random (art only, no extra dialogue).
  *
  * The standees are the upstream 512x512 WebP assets (`assets/pets/whale-musume`,
  * MIT — see the LICENSE beside them). They are drawn small on purpose; the
@@ -17,6 +33,20 @@
  * hop -8px / 0.6s. The pixel amounts are rescaled out of the standee's 512px
  * space; degrees are kept as authored.
  *
+ * The speech bubble is a SIBLING of the standee on the full-screen host layer,
+ * not a child of the 96x96 pet view. Two problems came from nesting it:
+ *   1. It was laid out outside its parent's bounds (`bottom: PET_SIZE + 10`), so
+ *      any ancestor that clips cuts the text instead of moving the bubble.
+ *   2. Its width could not be measured against the screen edges, so at the
+ *      default bottom-right corner (x = width - PET_SIZE - EDGE_MARGIN) its
+ *      right edge ran ~100px past the screen and the tail of every line was
+ *      cut off.
+ * As a host-layer sibling it tracks the pet through the same animated x/y
+ * shared values (so it follows a drag frame-by-frame), flips to the side of the
+ * pet that faces the middle of the screen, and clamps itself inside the safe
+ * horizontal band using its measured rendered width. It therefore can neither
+ * be clipped by a parent nor leave the screen at either edge.
+ *
  * @module paseo/components/pet-overlay
  */
 
@@ -24,7 +54,13 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Image } from "expo-image";
 import { usePathname } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { StyleSheet, Text, useWindowDimensions, View } from "react-native";
+import {
+  StyleSheet,
+  Text,
+  useWindowDimensions,
+  View,
+  type LayoutChangeEvent,
+} from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
   Easing,
@@ -37,19 +73,26 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useShallow } from "zustand/shallow";
+import { useSessionStore, type SessionState } from "@/stores/session-store";
 import { useWorkspaceStatusesForBadges } from "@/stores/session-store-hooks";
-import { BubbleGame } from "../pets/bubble-game";
-import { CatchGame } from "../pets/catch-game";
-import { GrowthPanel, type AchievementEntry, type GrowthState } from "../pets/growth-panel";
-import { PetMenu, type PetMenuAction } from "../pets/pet-menu";
-import { SettingsPanel } from "../pets/settings-panel";
+import type { StreamItem, TodoEntry, ToolCallItem, UserMessageItem } from "@/types/stream";
 import {
-  DEFAULT_SETTINGS,
-  loadPetSave,
-  savePetSave,
-  type PetSave,
-  type PetSettings,
-} from "../pets/pet-storage";
+  IDLE_RANDOM_MAX_MS,
+  IDLE_RANDOM_MIN_MS,
+  KEYWORD_POSES,
+  PAT_HOLD_MS,
+  PICK_UP_HOLD_MS,
+  POSE_ASSETS,
+  celebrationPose,
+  isIdleSeriesPose,
+  pickIdleRandomPose,
+  pickPatPose,
+  pickRandomMemePose,
+  resolveOverlayPose,
+  resolveToolPose,
+  type PoseName,
+} from "../pets/pose-map";
 
 // The upstream state machine is a UMD module with no DOM dependencies. Vendored
 // verbatim so its dialogue tables and rules stay byte-identical to the source
@@ -62,18 +105,7 @@ const core = require("../pets/whale-moe-core.js") as {
     now: number,
     rng: () => number,
   ) => PetState;
-  hitZone: (nx: number, ny: number, poseSet: "full" | "peek") => string;
-  POSES: Record<string, string>;
-  ACHIEVEMENTS: readonly AchievementEntry[];
-  computeGrowth: (
-    prev: unknown,
-    event: { type: string },
-    now: number,
-    pats: number,
-  ) => { growth: GrowthState; unlocks: string[]; leveledUp: boolean };
-  computeWeekSignin: (growth: unknown) => {
-    weekSignin: { week: string; days: string[]; rewarded1: boolean; rewarded3: boolean; rewarded7: boolean };
-  };
+  matchKeyword: (text: string, enabled: boolean) => string | null;
 };
 
 /** The slice of `computeState`'s return value this renderer reads. */
@@ -84,100 +116,6 @@ interface PetState {
   speak: boolean;
   mode?: string;
 }
-
-const POSES = {
-  abstract: require("../../assets/pets/whale-musume/dsh-whale-state-abstract.webp"),
-  achievement: require("../../assets/pets/whale-musume/dsh-whale-state-achievement.webp"),
-  afk: require("../../assets/pets/whale-musume/dsh-whale-state-afk.webp"),
-  angry: require("../../assets/pets/whale-musume/dsh-whale-state-angry.webp"),
-  "balance-low": require("../../assets/pets/whale-musume/dsh-whale-state-balance-low.webp"),
-  blush: require("../../assets/pets/whale-musume/dsh-whale-state-blush.webp"),
-  bold: require("../../assets/pets/whale-musume/dsh-whale-state-bold.webp"),
-  celebrate: require("../../assets/pets/whale-musume/dsh-whale-state-celebrate.webp"),
-  "cool-shades": require("../../assets/pets/whale-musume/dsh-whale-state-cool-shades.webp"),
-  curious: require("../../assets/pets/whale-musume/dsh-whale-state-curious.webp"),
-  "daily-coffee": require("../../assets/pets/whale-musume/dsh-whale-state-daily-coffee.webp"),
-  "daily-cooking": require("../../assets/pets/whale-musume/dsh-whale-state-daily-cooking.webp"),
-  "daily-done": require("../../assets/pets/whale-musume/dsh-whale-state-daily-done.webp"),
-  "daily-eat": require("../../assets/pets/whale-musume/dsh-whale-state-daily-eat.webp"),
-  "daily-fishing": require("../../assets/pets/whale-musume/dsh-whale-state-daily-fishing.webp"),
-  "daily-gaming": require("../../assets/pets/whale-musume/dsh-whale-state-daily-gaming.webp"),
-  "daily-melt": require("../../assets/pets/whale-musume/dsh-whale-state-daily-melt.webp"),
-  "daily-painting": require("../../assets/pets/whale-musume/dsh-whale-state-daily-painting.webp"),
-  "daily-pajama": require("../../assets/pets/whale-musume/dsh-whale-state-daily-pajama.webp"),
-  "daily-picnic": require("../../assets/pets/whale-musume/dsh-whale-state-daily-picnic.webp"),
-  "daily-shower": require("../../assets/pets/whale-musume/dsh-whale-state-daily-shower.webp"),
-  "daily-stretch": require("../../assets/pets/whale-musume/dsh-whale-state-daily-stretch.webp"),
-  eat: require("../../assets/pets/whale-musume/dsh-whale-state-eat.webp"),
-  failure: require("../../assets/pets/whale-musume/dsh-whale-state-failure.webp"),
-  "festival-christmas": require("../../assets/pets/whale-musume/dsh-whale-state-festival-christmas.webp"),
-  "festival-halloween": require("../../assets/pets/whale-musume/dsh-whale-state-festival-halloween.webp"),
-  "festival-mid-autumn": require("../../assets/pets/whale-musume/dsh-whale-state-festival-mid-autumn.webp"),
-  "festival-spring": require("../../assets/pets/whale-musume/dsh-whale-state-festival-spring.webp"),
-  "game-cheat": require("../../assets/pets/whale-musume/dsh-whale-state-game-cheat.webp"),
-  "game-happy": require("../../assets/pets/whale-musume/dsh-whale-state-game-happy.webp"),
-  "game-lose": require("../../assets/pets/whale-musume/dsh-whale-state-game-lose.webp"),
-  "game-think": require("../../assets/pets/whale-musume/dsh-whale-state-game-think.webp"),
-  "game-win": require("../../assets/pets/whale-musume/dsh-whale-state-game-win.webp"),
-  greet: require("../../assets/pets/whale-musume/dsh-whale-state-greet.webp"),
-  "idle-cute": require("../../assets/pets/whale-musume/dsh-whale-state-idle-cute.webp"),
-  levelup: require("../../assets/pets/whale-musume/dsh-whale-state-levelup.webp"),
-  "meme-broke": require("../../assets/pets/whale-musume/dsh-whale-state-meme-broke.webp"),
-  "meme-cry": require("../../assets/pets/whale-musume/dsh-whale-state-meme-cry.webp"),
-  "meme-doge": require("../../assets/pets/whale-musume/dsh-whale-state-meme-doge.webp"),
-  "meme-doubt": require("../../assets/pets/whale-musume/dsh-whale-state-meme-doubt.webp"),
-  "meme-heart": require("../../assets/pets/whale-musume/dsh-whale-state-meme-heart.webp"),
-  "meme-kyun": require("../../assets/pets/whale-musume/dsh-whale-state-meme-kyun.webp"),
-  "meme-music": require("../../assets/pets/whale-musume/dsh-whale-state-meme-music.webp"),
-  "meme-no": require("../../assets/pets/whale-musume/dsh-whale-state-meme-no.webp"),
-  "meme-ojisan": require("../../assets/pets/whale-musume/dsh-whale-state-meme-ojisan.webp"),
-  "meme-omg": require("../../assets/pets/whale-musume/dsh-whale-state-meme-omg.webp"),
-  "meme-peace": require("../../assets/pets/whale-musume/dsh-whale-state-meme-peace.webp"),
-  "meme-shock": require("../../assets/pets/whale-musume/dsh-whale-state-meme-shock.webp"),
-  "meme-sike": require("../../assets/pets/whale-musume/dsh-whale-state-meme-sike.webp"),
-  "meme-smile-pain": require("../../assets/pets/whale-musume/dsh-whale-state-meme-smile-pain.webp"),
-  "meme-smug": require("../../assets/pets/whale-musume/dsh-whale-state-meme-smug.webp"),
-  "meme-wakuwaku": require("../../assets/pets/whale-musume/dsh-whale-state-meme-wakuwaku.webp"),
-  "meme-worship": require("../../assets/pets/whale-musume/dsh-whale-state-meme-worship.webp"),
-  "meme-yes": require("../../assets/pets/whale-musume/dsh-whale-state-meme-yes.webp"),
-  night: require("../../assets/pets/whale-musume/dsh-whale-state-night.webp"),
-  "pick-up": require("../../assets/pets/whale-musume/dsh-whale-state-pick-up.webp"),
-  "react-belly": require("../../assets/pets/whale-musume/dsh-whale-state-react-belly.webp"),
-  "react-head": require("../../assets/pets/whale-musume/dsh-whale-state-react-head.webp"),
-  "react-tail": require("../../assets/pets/whale-musume/dsh-whale-state-react-tail.webp"),
-  running: require("../../assets/pets/whale-musume/dsh-whale-state-running.webp"),
-  sleep: require("../../assets/pets/whale-musume/dsh-whale-state-sleep.webp"),
-  star: require("../../assets/pets/whale-musume/dsh-whale-state-star.webp"),
-  success: require("../../assets/pets/whale-musume/dsh-whale-state-success.webp"),
-  sweep: require("../../assets/pets/whale-musume/dsh-whale-state-sweep.webp"),
-  "tail-swing": require("../../assets/pets/whale-musume/dsh-whale-state-tail-swing.webp"),
-  teasing: require("../../assets/pets/whale-musume/dsh-whale-state-teasing.webp"),
-  thinking: require("../../assets/pets/whale-musume/dsh-whale-state-thinking.webp"),
-  tool: require("../../assets/pets/whale-musume/dsh-whale-state-tool.webp"),
-  valentine: require("../../assets/pets/whale-musume/dsh-whale-state-valentine.webp"),
-  waiting: require("../../assets/pets/whale-musume/dsh-whale-state-waiting.webp"),
-  "weather-cold": require("../../assets/pets/whale-musume/dsh-whale-state-weather-cold.webp"),
-  "weather-rain-happy": require("../../assets/pets/whale-musume/dsh-whale-state-weather-rain-happy.webp"),
-  "weather-snow": require("../../assets/pets/whale-musume/dsh-whale-state-weather-snow.webp"),
-  "weather-thunder": require("../../assets/pets/whale-musume/dsh-whale-state-weather-thunder.webp"),
-  "weather-umbrella": require("../../assets/pets/whale-musume/dsh-whale-state-weather-umbrella.webp"),
-  wink: require("../../assets/pets/whale-musume/dsh-whale-state-wink.webp"),
-  "work-boss": require("../../assets/pets/whale-musume/dsh-whale-state-work-boss.webp"),
-  "work-celebrate": require("../../assets/pets/whale-musume/dsh-whale-state-work-celebrate.webp"),
-  "work-deadline": require("../../assets/pets/whale-musume/dsh-whale-state-work-deadline.webp"),
-  "work-debug": require("../../assets/pets/whale-musume/dsh-whale-state-work-debug.webp"),
-  "work-deploy": require("../../assets/pets/whale-musume/dsh-whale-state-work-deploy.webp"),
-  "work-idea": require("../../assets/pets/whale-musume/dsh-whale-state-work-idea.webp"),
-  "work-meeting": require("../../assets/pets/whale-musume/dsh-whale-state-work-meeting.webp"),
-  "work-pat": require("../../assets/pets/whale-musume/dsh-whale-state-work-pat.webp"),
-  "work-ram": require("../../assets/pets/whale-musume/dsh-whale-state-work-ram.webp"),
-  "work-review": require("../../assets/pets/whale-musume/dsh-whale-state-work-review.webp"),
-  "work-slack": require("../../assets/pets/whale-musume/dsh-whale-state-work-slack.webp"),
-  "work-slack-phone": require("../../assets/pets/whale-musume/dsh-whale-state-work-slack-phone.webp"),
-  "work-sleep": require("../../assets/pets/whale-musume/dsh-whale-state-work-sleep.webp"),
-} as const;
-
-type PoseName = keyof typeof POSES;
 
 /** On-screen size of the standee, in points. Deliberately smaller than upstream. */
 const PET_SIZE = 96;
@@ -200,10 +138,64 @@ const POSE_IN_PX = 4 * ART_TO_SCREEN * 2;
 const TICK_MS = 500;
 /** How long a finished line stays on screen before the bubble fades. */
 const BUBBLE_HOLD_MS = 4500;
+/** Gap between the bubble and the standee, in points. */
+const BUBBLE_GAP = 10;
+/**
+ * Preferred maximum bubble width. The bubble is clamped to the screen anyway,
+ * so this only stops a long line from spanning a whole tablet.
+ */
+const BUBBLE_MAX_WIDTH = 260;
+/**
+ * A user message older than this did not just arrive (it came from timeline
+ * hydration on launch), so it must not trigger a keyword / meme reaction.
+ */
+const KEYWORD_TRIGGER_MAX_AGE_MS = 5 * 60 * 1000;
 
 interface StoredPosition {
   x: number;
   y: number;
+}
+
+/** How much of the most recent todo list is done, and whose list it is. */
+interface TodoProgress {
+  agentId: string;
+  completed: number;
+  total: number;
+}
+
+/**
+ * The structural slice of the session store this overlay reads. Typing it
+ * narrowly keeps the selectors honest: they may not reach for anything else.
+ */
+interface PetStoreSource {
+  sessions: Record<string, SessionState>;
+}
+
+/** What the active conversation is doing, reduced to the fields the pet needs. */
+interface PetActivity {
+  /** Name of the newest tool call in the turn, if the turn has one yet. */
+  toolName: string | null;
+  /** When that tool call was issued (ms). */
+  toolAt: number;
+  /** `matchKeyword` id for the newest user message, or null when none matched. */
+  keywordId: string | null;
+  /** When the newest user message was sent (ms). */
+  userAt: number;
+  /** The newest stream item is a thought that is still streaming. */
+  thought: boolean;
+}
+
+const EMPTY_ACTIVITY: PetActivity = {
+  toolName: null,
+  toolAt: 0,
+  keywordId: null,
+  userAt: 0,
+  thought: false,
+};
+
+interface ActiveAgent {
+  session: SessionState;
+  agentId: string;
 }
 
 /** Per-character delay for the typewriter, mirroring the upstream pacing. */
@@ -213,18 +205,174 @@ function charDelay(character: string): number {
   return 64;
 }
 
-function pickRandom<T>(items: readonly T[]): T {
-  return items[Math.floor(Math.random() * items.length)];
+function lastActivityOf(session: SessionState, agentId: string): number {
+  const agent = session.agents.get(agentId);
+  return (agent?.lastActivityAt ?? agent?.updatedAt)?.getTime() ?? 0;
+}
+
+/**
+ * The conversation the pet should mirror.
+ *
+ * The focused agent wins, because that is the screen the user is looking at.
+ * With nothing focused (e.g. the project list) the most recently active root
+ * agent wins, so the pet still reflects work that is actually running.
+ */
+function pickActiveAgent(state: PetStoreSource): ActiveAgent | null {
+  let focusedBest: ActiveAgent | null = null;
+  let focusedAt = Number.NEGATIVE_INFINITY;
+  let recentBest: ActiveAgent | null = null;
+  let recentAt = Number.NEGATIVE_INFINITY;
+
+  for (const session of Object.values(state.sessions)) {
+    const focusedId = session.focusedAgentId;
+    if (focusedId !== null && session.agents.has(focusedId)) {
+      const at = lastActivityOf(session, focusedId);
+      if (at > focusedAt) {
+        focusedAt = at;
+        focusedBest = { session, agentId: focusedId };
+      }
+    }
+    for (const agent of session.agents.values()) {
+      if (agent.archivedAt || agent.parentAgentId) continue;
+      const at = (agent.lastActivityAt ?? agent.updatedAt).getTime();
+      if (at > recentAt) {
+        recentAt = at;
+        recentBest = { session, agentId: agent.id };
+      }
+    }
+  }
+
+  return focusedBest ?? recentBest;
+}
+
+function toolCallName(item: ToolCallItem): string | null {
+  const payload = item.payload;
+  if (payload.source === "agent") return payload.data.name;
+  return payload.data.toolName;
+}
+
+/** Newest tool call of the current turn, or null when the turn issued none yet. */
+function latestToolCall(session: SessionState, agentId: string): ToolCallItem | null {
+  const streams = [session.agentStreamHead.get(agentId), session.agentStreamTail.get(agentId)];
+  for (const items of streams) {
+    if (items === undefined) continue;
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index];
+      if (item === undefined) continue;
+      if (item.kind === "tool_call") return item;
+      // The newest user message marks the start of a new turn: tool calls
+      // before it belong to the previous one and must not be shown again.
+      if (item.kind === "user_message") return null;
+    }
+  }
+  return null;
+}
+
+function latestUserMessage(session: SessionState, agentId: string): UserMessageItem | null {
+  const streams = [session.agentStreamHead.get(agentId), session.agentStreamTail.get(agentId)];
+  for (const items of streams) {
+    if (items === undefined) continue;
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index];
+      if (item === undefined) continue;
+      if (item.kind === "user_message") return item;
+    }
+  }
+  return null;
+}
+
+function latestStreamItem(session: SessionState, agentId: string): StreamItem | undefined {
+  const head = session.agentStreamHead.get(agentId);
+  const headLast = head !== undefined && head.length > 0 ? head[head.length - 1] : undefined;
+  if (headLast !== undefined) return headLast;
+  const tail = session.agentStreamTail.get(agentId);
+  return tail !== undefined && tail.length > 0 ? tail[tail.length - 1] : undefined;
+}
+
+/**
+ * Read the active conversation's stream, reduced to plain values so zustand's
+ * shallow comparison keeps the overlay from re-rendering on every streamed
+ * token (a streaming delta changes the stream arrays, not these fields).
+ */
+function selectPetActivity(state: PetStoreSource): PetActivity {
+  const active = pickActiveAgent(state);
+  if (active === null) return EMPTY_ACTIVITY;
+  const { session, agentId } = active;
+
+  const userMessage = latestUserMessage(session, agentId);
+  const userAt = userMessage?.timestamp.getTime() ?? 0;
+  const toolCall = latestToolCall(session, agentId);
+  const toolAt = toolCall?.timestamp.getTime() ?? 0;
+  // A tool call from before the newest user message belongs to the previous
+  // turn; using it would replay the wrong standee for the new message.
+  const toolName = toolCall !== null && toolAt >= userAt ? toolCallName(toolCall) : null;
+  const latest = latestStreamItem(session, agentId);
+  const keywordId = userMessage === null ? null : core.matchKeyword(userMessage.text, true);
+
+  return {
+    toolName,
+    toolAt: toolName === null ? 0 : toolAt,
+    keywordId,
+    userAt,
+    thought: latest?.kind === "thought",
+  };
+}
+
+/** A todo list plus the agent it belongs to. */
+interface TodoListSnapshot {
+  agentId: string;
+  tasks: readonly TodoEntry[];
+}
+
+/**
+ * The todo list of the most recently active agent that has one.
+ *
+ * Agents with sub-agents can carry a task list of their own, and a busy
+ * sub-agent would otherwise win every activity comparison and make the
+ * progress bar jump between lists. Root agents are therefore preferred; a
+ * sub-agent list is only used when no root agent has tasks at all.
+ *
+ * The owning agent id travels with the list because the progress announcement
+ * below needs it: a jump from one agent's list to another's is not forward
+ * progress. The snapshot holds one of the arrays already stored in the map (so
+ * zustand's shallow comparison keeps the overlay from re-rendering on unrelated
+ * store updates) and the agent id that array belongs to.
+ */
+function selectMostRecentTodoList(state: PetStoreSource): TodoListSnapshot | null {
+  let rootList: TodoListSnapshot | null = null;
+  let rootActivity = Number.NEGATIVE_INFINITY;
+  let otherList: TodoListSnapshot | null = null;
+  let otherActivity = Number.NEGATIVE_INFINITY;
+
+  for (const session of Object.values(state.sessions)) {
+    for (const [agentId, tasks] of session.agentTasks) {
+      if (tasks.length === 0) continue;
+      const agent = session.agents.get(agentId);
+      if (agent?.archivedAt) continue;
+      const activity = (agent?.lastActivityAt ?? agent?.updatedAt)?.getTime() ?? 0;
+      if (!agent?.parentAgentId) {
+        if (activity > rootActivity) {
+          rootActivity = activity;
+          rootList = { agentId, tasks };
+        }
+      } else if (activity > otherActivity) {
+        otherActivity = activity;
+        otherList = { agentId, tasks };
+      }
+    }
+  }
+
+  return rootList ?? otherList;
 }
 
 export function PetOverlay() {
   const { width, height } = useWindowDimensions();
-  const insets = useSafeAreaInsets();
+  const { top: topInset, bottom: bottomInset } = useSafeAreaInsets();
   const pathname = usePathname();
 
   // Host signals: Paseo's own workspace buckets, mapped onto the names the
-  // upstream state machine expects. `thinking` has no direct bucket, so it
-  // stays false rather than being guessed at.
+  // upstream state machine expects. `thinking` has no bucket of its own; the
+  // tick derives it from the stream (a thought item streaming in an open turn).
   const workspaceStatuses = useWorkspaceStatusesForBadges();
   const signals = useMemo<Record<string, unknown>>(() => {
     const seen = new Set(workspaceStatuses);
@@ -240,6 +388,11 @@ export function PetOverlay() {
   const signalsRef = useRef(signals);
   signalsRef.current = signals;
 
+  // The active conversation's newest tool call / user message / thought.
+  const activity = useSessionStore(useShallow(selectPetActivity));
+  const activityRef = useRef(activity);
+  activityRef.current = activity;
+
   // The state machine carries its own memory (lastSpeechAt, streak, lineCount),
   // so the previous return value must be fed back in on every tick.
   // Holds the *complete* previous return value. `computeState` keeps its own
@@ -251,62 +404,238 @@ export function PetOverlay() {
   }
 
   const [petState, setPetState] = useState<PetState>(stateRef.current as PetState);
+  const liveLineRef = useRef(petState.line);
+  liveLineRef.current = petState.line;
 
-  // ---- save + panels -------------------------------------------------------
-  // The save owns the five upstream preferences plus the opaque growth/game
-  // blobs; the panels below write back through `persistSave`.
-  const [save, setSave] = useState<PetSave | null>(null);
-  const saveRef = useRef<PetSave | null>(null);
-  const [panel, setPanel] = useState<"menu" | PetMenuAction | null>(null);
+  // ---- todo progress -------------------------------------------------------
+  // The task list is drawn as a thin bar in the bubble; a change in the number
+  // of completed steps is also reported as a spoken line and a celebration pose.
+  const todoList = useSessionStore(useShallow(selectMostRecentTodoList));
+  const todoProgress = useMemo<TodoProgress | null>(() => {
+    if (todoList === null) return null;
+    const { agentId, tasks } = todoList;
+    if (tasks.length === 0) return null;
+    let completed = 0;
+    for (const task of tasks) {
+      if (task.completed) completed += 1;
+    }
+    return { agentId, completed, total: tasks.length };
+  }, [todoList]);
 
+  // ---- pose trigger state --------------------------------------------------
+  // These are refs, not state: the 500ms tick resolves the pose and is the only
+  // place that repaints, so the trigger effects must not each cause a render.
+  /** Latest keyword / random-meme reaction to a user message. */
+  const keywordPoseRef = useRef<{ pose: PoseName; at: number } | null>(null);
+  /** Latest celebration pose for a completed todo step. */
+  const celebrationRef = useRef<{ pose: PoseName; at: number } | null>(null);
+  /** Latest 3-5 minute idle-variety pick; cleared by any interaction. */
+  const idleRandomRef = useRef<{ pose: PoseName; pickedAt: number } | null>(null);
+  /** Active pat reaction. */
+  const patPoseRef = useRef<{ pose: PoseName; until: number } | null>(null);
+  /** While dragging (and briefly after) the pickup standee wins. */
+  const draggingRef = useRef(false);
+  const dragUntilRef = useRef(0);
+  /** Last direct touch; drives the upstream AFK clock. */
+  const lastInteractionRef = useRef(Date.now());
+  /** Last stream activity (tool call / user message); gates idle variety. */
+  const lastStreamActivityRef = useRef(0);
+  /** Last user message the keyword layer reacted to. */
+  const lastKeywordUserAtRef = useRef(0);
+  /** Timestamp of the last workspace that entered the done bucket. */
+  const successAtRef = useRef(0);
+  const sawDoneWorkspaceRef = useRef(false);
+  /** Previous todo baseline: whose list it was and how far it had got. */
+  const announcedTodoRef = useRef<{ agentId: string; completed: number } | null>(null);
+  const progressLineIdRef = useRef(0);
+
+  // A workspace finishing is the one positive event Paseo reports; feed it to
+  // the state machine's success window so her success standee can appear.
   useEffect(() => {
-    let cancelled = false;
-    void loadPetSave().then((loaded) => {
-      if (cancelled) return;
-      saveRef.current = loaded;
-      setSave(loaded);
-    });
+    const hasDone = workspaceStatuses.includes("done");
+    if (hasDone && !sawDoneWorkspaceRef.current) {
+      successAtRef.current = Date.now();
+    }
+    sawDoneWorkspaceRef.current = hasDone;
+  }, [workspaceStatuses]);
+
+  // One-shot line that overrides the state machine's own dialogue. The module
+  // is vendored and must not be modified, so the progress line is layered on
+  // top in the renderer instead. The same event picks a celebration standee.
+  const [progressLine, setProgressLine] = useState<{ id: number; text: string } | null>(null);
+  useEffect(() => {
+    if (todoProgress === null) {
+      announcedTodoRef.current = null;
+      return;
+    }
+    const previous = announcedTodoRef.current;
+    // The baseline always follows the newest list, so the next comparison is
+    // against the same agent's numbers.
+    announcedTodoRef.current = {
+      agentId: todoProgress.agentId,
+      completed: todoProgress.completed,
+    };
+    // Announce only real forward progress inside one agent's own list. A fresh
+    // list (first hydration) and a jump to another agent's list both rebuild the
+    // baseline without speaking: "第 N 步完成了" must never describe a list that
+    // simply replaced the one being watched.
+    if (previous === null || previous.agentId !== todoProgress.agentId) return;
+    if (todoProgress.completed <= previous.completed) return;
+    const remaining = todoProgress.total - todoProgress.completed;
+    const text =
+      remaining <= 0
+        ? `全部 ${todoProgress.total} 步都完成啦，收工！`
+        : `第 ${todoProgress.completed} 步完成了，还剩 ${remaining} 个`;
+    progressLineIdRef.current += 1;
+    setProgressLine({ id: progressLineIdRef.current, text });
+    celebrationRef.current = {
+      pose: celebrationPose(todoProgress.completed, remaining <= 0),
+      at: Date.now(),
+    };
+    idleRandomRef.current = null;
+  }, [todoProgress]);
+
+  // A new user message: react to what was said (keyword standee, or a random
+  // meme when nothing matched) and reset the idle-variety layer.
+  useEffect(() => {
+    if (activity.userAt <= 0 || activity.userAt === lastKeywordUserAtRef.current) return;
+    lastKeywordUserAtRef.current = activity.userAt;
+    lastStreamActivityRef.current = Math.max(lastStreamActivityRef.current, activity.userAt);
+    idleRandomRef.current = null;
+    // Timeline hydration on launch replays old messages; a two-day-old "晚安"
+    // must not put her to bed the moment the app opens.
+    if (Date.now() - activity.userAt > KEYWORD_TRIGGER_MAX_AGE_MS) return;
+    const matched: PoseName | undefined =
+      activity.keywordId === null ? undefined : KEYWORD_POSES[activity.keywordId];
+    keywordPoseRef.current = {
+      pose: matched ?? pickRandomMemePose(),
+      at: Date.now(),
+    };
+  }, [activity.userAt, activity.keywordId]);
+
+  // Tool activity is not a user message, but it does mean "not idle".
+  useEffect(() => {
+    if (activity.toolAt <= 0) return;
+    lastStreamActivityRef.current = Math.max(lastStreamActivityRef.current, activity.toolAt);
+    idleRandomRef.current = null;
+  }, [activity.toolAt]);
+
+  // Idle variety: every 3-5 minutes, if the pet has been genuinely quiet, swap
+  // in a daily-life / meme standee. Art only — it never speaks on its own.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = () => {
+      const delay = IDLE_RANDOM_MIN_MS + Math.random() * (IDLE_RANDOM_MAX_MS - IDLE_RANDOM_MIN_MS);
+      timer = setTimeout(() => {
+        const rawPose = (stateRef.current as PetState | undefined)?.pose;
+        const lastActivity = Math.max(lastInteractionRef.current, lastStreamActivityRef.current);
+        if (
+          rawPose !== undefined &&
+          isIdleSeriesPose(rawPose) &&
+          Date.now() - lastActivity >= IDLE_RANDOM_MIN_MS
+        ) {
+          idleRandomRef.current = { pose: pickIdleRandomPose(), pickedAt: Date.now() };
+        }
+        schedule();
+      }, delay);
+    };
+    schedule();
     return () => {
-      cancelled = true;
+      if (timer !== undefined) clearTimeout(timer);
     };
   }, []);
 
-  const settings = save?.settings ?? DEFAULT_SETTINGS;
-  const persistSave = useCallback((next: PetSave) => {
-    saveRef.current = next;
-    setSave(next);
-    void savePetSave(next);
-  }, []);
-
+  // ---- state machine tick --------------------------------------------------
   useEffect(() => {
     const timer = setInterval(() => {
-      const next = core.computeState(stateRef.current, signalsRef.current, Date.now(), Math.random);
-      stateRef.current = next;
-      // Repaint only when something the renderer draws actually changed; the
-      // module ticks every 500ms and would otherwise re-render constantly.
-      setPetState((current) =>
-        current.pose === next.pose && current.line === next.line && current.speak === next.speak
-          ? current
-          : next,
+      const now = Date.now();
+      const activityNow = activityRef.current;
+      // A workspace bucket says only that a turn is open. While a thought item
+      // is streaming she is thinking, not running a tool: split that out so the
+      // state machine itself picks the thinking standee.
+      const workspaceRunning = signalsRef.current.tool === true;
+      const thinking = workspaceRunning && activityNow.thought;
+      const next = core.computeState(
+        stateRef.current,
+        {
+          ...signalsRef.current,
+          tool: workspaceRunning && !thinking,
+          thinking,
+          // A pat resets the upstream idle clock; so does real work in the
+          // active conversation, so she does not doze off mid-turn. The
+          // workspace buckets carry no interaction timestamp of their own.
+          lastInteraction: Math.max(lastInteractionRef.current, lastStreamActivityRef.current),
+          // The module only accepts a success inside its own 2s window, so a
+          // stale timestamp is harmless.
+          successAt: successAtRef.current,
+        },
+        now,
+        Math.random,
       );
+      stateRef.current = next;
+      const pose = resolveOverlayPose({
+        now,
+        hour: new Date(now).getHours(),
+        statePose: next.pose,
+        dragging: now < dragUntilRef.current,
+        pat: patPoseRef.current,
+        tool:
+          activityNow.toolName === null
+            ? null
+            : { pose: resolveToolPose(activityNow.toolName), at: activityNow.toolAt },
+        keyword: keywordPoseRef.current,
+        celebration: celebrationRef.current,
+        idleRandom: idleRandomRef.current,
+      });
+      // Repaint only when something the renderer draws actually changed; the
+      // state machine ticks every 500ms and the pose layer keeps updating, so
+      // this comparison is what keeps the overlay from re-rendering constantly.
+      setPetState((current) => {
+        const drawn: PetState = { ...next, pose };
+        return current.pose === drawn.pose &&
+          current.line === drawn.line &&
+          current.speak === drawn.speak
+          ? current
+          : drawn;
+      });
     }, TICK_MS);
     return () => clearInterval(timer);
   }, []);
 
+  // The state machine's own line, unless a progress line is currently speaking.
+  const displayLine = progressLine === null ? petState.line : progressLine.text;
+  const progressLineId = progressLine === null ? null : progressLine.id;
+  // `computeState` returns `line: ""` on every tick that did not produce a new
+  // line — speech is rate-limited to SPEECH_GAP_MS (6000ms) while this renderer
+  // ticks every TICK_MS (500ms) — so `displayLine` is empty for most ticks.
+  // Keying the typewriter off `displayLine` directly made each of those empty
+  // ticks re-run the effect below, whose cleanup cleared the in-flight typing /
+  // hold timers: the bubble froze on the first few characters and never hid
+  // (the reported "text cut off" bug). Keep the last real line and fall back to
+  // it on empty ticks, so `bubbleLine` only changes when a genuinely new line
+  // arrives and the timers are left alone in between.
+  const lastNonEmptyLineRef = useRef<string>("");
+  const bubbleLine = displayLine || lastNonEmptyLineRef.current;
+
   // Typewriter: reveal the current line character by character, then hold it.
   //
-  // The bubble's lifetime is owned by the hold timer, NOT by `speak`. The state
-  // machine ticks every TICK_MS and reports `speak: true` only on the tick that
-  // produced a new line, flipping it back to false on the next one — keying the
-  // bubble off `speak` therefore dismissed it after a single tick, before the
-  // typewriter had even finished. Only a *change of line* starts a bubble.
+  // The bubble's lifetime is owned by the hold timer, NOT by `speak`: the state
+  // machine reports `speak: true` only on the tick that produced a new line and
+  // flips it back on the next one. Only a *change of line* starts a bubble.
   const [typed, setTyped] = useState("");
   const [bubbleVisible, setBubbleVisible] = useState(false);
   const lastLineRef = useRef<string>("");
   useEffect(() => {
-    const line = petState.line;
-    if (!line || line === lastLineRef.current) return;
-    lastLineRef.current = line;
+    const line = bubbleLine;
+    if (!line) return;
+    // Two independent sources: a progress line is identified by its id, a
+    // state-machine line by its text. Keeping the id in the key means a later
+    // progress line with identical text still counts as new, while a repeat of
+    // the current line (from either source) is ignored.
+    const lineKey = progressLineId === null ? line : `progress:${progressLineId}:${line}`;
+    if (lineKey === lastLineRef.current) return;
+    lastLineRef.current = lineKey;
+    lastNonEmptyLineRef.current = line;
     setBubbleVisible(true);
     setTyped("");
     let index = 0;
@@ -315,16 +644,27 @@ export function PetOverlay() {
       index += 1;
       setTyped(line.slice(0, index));
       if (index < line.length) {
-        timer = setTimeout(step, charDelay(line[index - 1]));
+        timer = setTimeout(step, charDelay(line[index - 1] ?? ""));
       } else {
-        timer = setTimeout(() => setBubbleVisible(false), BUBBLE_HOLD_MS);
+        timer = setTimeout(() => {
+          setBubbleVisible(false);
+          // Hand the bubble back to the state machine after a progress line.
+          // Both guards are synced to whatever line is live right now, so that
+          // line is not typed out as if it had just happened, and the bubble
+          // stays hidden until a genuinely new line arrives.
+          if (progressLineId !== null) {
+            lastLineRef.current = liveLineRef.current;
+            lastNonEmptyLineRef.current = liveLineRef.current;
+            setProgressLine(null);
+          }
+        }, BUBBLE_HOLD_MS);
       }
     };
     timer = setTimeout(step, 0);
     return () => {
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [petState.line]);
+  }, [bubbleLine, progressLineId]);
 
   // Motion drivers. `breathe` and `sway` loop forever; `hop` and `poseIn` are
   // one-shots retriggered by a tap or a pose change.
@@ -339,9 +679,15 @@ export function PetOverlay() {
   const originX = useSharedValue(0);
   const originY = useSharedValue(0);
 
+  // Measured size of the bubble. It lives on the host layer as an absolute
+  // child of the full-screen view, so its rendered width has to be fed back in
+  // before it can be clamped against the screen edges.
+  const bubbleWidth = useSharedValue(0);
+  const bubbleHeight = useSharedValue(0);
+
   const minX = EDGE_MARGIN;
   const maxX = Math.max(EDGE_MARGIN, width - PET_SIZE - EDGE_MARGIN);
-  const minY = insets.top + EDGE_MARGIN;
+  const minY = topInset + EDGE_MARGIN;
   const maxY = Math.max(minY, height - PET_SIZE - EDGE_MARGIN);
 
   // Upstream soft set: wm-breathe (-4px over 3.4s) and wm-sway (0 -> 1.2deg / 6s).
@@ -413,17 +759,6 @@ export function PetOverlay() {
     });
   }, []);
 
-  /** Record one growth interaction (mood/affinity) and persist it. */
-  const recordGrowth = useCallback(
-    (type: string) => {
-      const current = saveRef.current;
-      if (current === null) return;
-      const result = core.computeGrowth(current.growth, { type }, Date.now(), 1);
-      persistSave({ ...current, growth: result.growth });
-    },
-    [persistSave],
-  );
-
   /** Play wm-hop once. */
   const playHop = useCallback(() => {
     hop.value = 0;
@@ -434,14 +769,33 @@ export function PetOverlay() {
   }, [hop]);
 
   /**
-   * A tap. The upstream build splits this into head / belly / tail hit zones
-   * (`hitZone`), but this renderer has no pointer coordinates inside a gesture
-   * callback without extra plumbing, so it plays the generic reaction.
+   * A tap anywhere on the standee is a pat. The whole 96pt cell is one button:
+   * the upstream build's head / belly / tail hit zones are intentionally gone.
+   * Tapping plays the hop, resets the upstream idle clock, and picks a reaction
+   * standee — one of the three react-* poses, or the working pat while a
+   * workspace is busy.
    */
   const react = useCallback(() => {
+    const now = Date.now();
+    lastInteractionRef.current = now;
+    const rawPose = (stateRef.current as PetState | undefined)?.pose;
+    const working = rawPose === "running" || rawPose === "thinking";
+    patPoseRef.current = { pose: pickPatPose(working), until: now + PAT_HOLD_MS };
+    idleRandomRef.current = null;
     playHop();
-    recordGrowth("pat");
-  }, [playHop, recordGrowth]);
+  }, [playHop]);
+
+  const dragStarted = useCallback(() => {
+    draggingRef.current = true;
+    dragUntilRef.current = Number.POSITIVE_INFINITY;
+    idleRandomRef.current = null;
+  }, []);
+
+  const dragEnded = useCallback(() => {
+    if (!draggingRef.current) return;
+    draggingRef.current = false;
+    dragUntilRef.current = Date.now() + PICK_UP_HOLD_MS;
+  }, []);
 
   const pan = useMemo(
     () =>
@@ -450,6 +804,7 @@ export function PetOverlay() {
           originX.value = x.value;
           originY.value = y.value;
           pressScale.value = withSpring(1.08, { damping: 20, stiffness: 220 });
+          runOnJS(dragStarted)();
         })
         .onUpdate((event) => {
           x.value = originX.value + event.translationX;
@@ -464,32 +819,18 @@ export function PetOverlay() {
         })
         .onFinalize(() => {
           pressScale.value = withSpring(1, { damping: 20, stiffness: 220 });
+          runOnJS(dragEnded)();
         }),
     // Shared values are stable identities; this closure only reads and writes them.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [minX, maxX, minY, maxY, persist],
+    [minX, maxX, minY, maxY, persist, dragStarted, dragEnded],
   );
 
   const tap = useMemo(() => Gesture.Tap().maxDistance(12).onEnd(() => runOnJS(react)()), [react]);
 
-  // Long-press opens the menu: phones have no right-click, which is what the
-  // upstream build binds its context menu to.
-  const longPress = useMemo(
-    () =>
-      Gesture.LongPress()
-        .minDuration(450)
-        .onStart(() => runOnJS(setPanel)("menu")),
-    [],
-  );
-
-  // Long-press must win over the tap, and a drag must not open the menu.
-  const gesture = useMemo(
-    () => Gesture.Exclusive(longPress, pan, tap),
-    [longPress, pan, tap],
-  );
-
-  /** Route a menu pick to the right sheet. */
-  const handleAction = useCallback((action: PetMenuAction) => setPanel(action), []);
+  // A drag must not be mistaken for a tap. The long-press menu used to win over
+  // both; with the menu gone the pan/tap pair is all that is left.
+  const gesture = useMemo(() => Gesture.Exclusive(pan, tap), [pan, tap]);
 
   const petStyle = useAnimatedStyle(() => ({
     opacity: 0.2 + 0.8 * poseIn.value,
@@ -504,17 +845,82 @@ export function PetOverlay() {
     ],
   }));
 
-  // The upstream standee name is already the suffix of its file name, so an
-  // unknown pose (a newer upstream mood) falls back to the idle standee.
-  const standee = POSES[petState.pose as PoseName] ?? POSES["idle-cute"];
+  // State -> pose -> standee. `computeState` (and the trigger layer) produce an
+  // upstream pose name; `POSE_ASSETS` maps it to one of the 79 standees. This
+  // link is the product: different states must look different.
+  const standee = POSE_ASSETS[petState.pose as PoseName] ?? POSE_ASSETS["idle-cute"];
 
-  // `pet` is the upstream "show the pet at all" switch; turning it off is the
-  // whole hide mechanism, so honour it here rather than only in the settings UI.
-  if (HIDDEN_ROUTES.has(pathname) || !settings.pet) return null;
+  /**
+   * Place the bubble relative to the *current* animated pet position.
+   *
+   * The bubble is a child of the full-screen host, positioned at (0, 0) and
+   * moved with transforms, so its layout size is untouched by where the pet is.
+   * Each frame:
+   *   - flip: a pet in the right half opens the bubble leftwards (bubble right
+   *     edge on the pet's right edge), a pet in the left half rightwards
+   *     (bubble left edge on the pet's left edge);
+   *   - clamp: keep the bubble inside [EDGE_MARGIN, width - EDGE_MARGIN] using
+   *     its measured width, which is what actually prevents clipping;
+   *   - above the standee, or below it when there is no room above.
+   */
+  const bubbleStyle = useAnimatedStyle(() => {
+    const measuredWidth = bubbleWidth.value;
+    const measuredHeight = bubbleHeight.value;
+    const petX = x.value;
+    const petY = y.value;
+
+    const opensLeft = petX + PET_SIZE / 2 > width / 2;
+    const preferredLeft = opensLeft ? petX + PET_SIZE - measuredWidth : petX;
+    const clampedLeft = Math.max(
+      EDGE_MARGIN,
+      Math.min(preferredLeft, width - EDGE_MARGIN - measuredWidth),
+    );
+
+    const aboveTop = petY - BUBBLE_GAP - measuredHeight;
+    const belowTop = petY + PET_SIZE + BUBBLE_GAP;
+    const preferredTop = aboveTop >= topInset + EDGE_MARGIN ? aboveTop : belowTop;
+    const clampedTop = Math.max(
+      topInset + EDGE_MARGIN,
+      Math.min(preferredTop, height - bottomInset - EDGE_MARGIN - measuredHeight),
+    );
+
+    return {
+      // Keep the bubble invisible until its size is known; otherwise it would
+      // flash at the top-left corner for a frame before the first layout pass.
+      opacity: measuredWidth > 0 ? 1 : 0,
+      transform: [{ translateX: clampedLeft }, { translateY: clampedTop }],
+    };
+  }, [width, height, topInset, bottomInset]);
+
+  const measureBubble = useCallback(
+    (event: LayoutChangeEvent) => {
+      bubbleWidth.value = event.nativeEvent.layout.width;
+      bubbleHeight.value = event.nativeEvent.layout.height;
+    },
+    [bubbleWidth, bubbleHeight],
+  );
+
+  // Forget the last measurement when the bubble hides: the next line can be a
+  // different width, and the bubble is invisible (opacity 0) until `onLayout`
+  // reports the new size, so it never flashes at the old one.
+  useEffect(() => {
+    if (bubbleVisible) return;
+    bubbleWidth.value = 0;
+    bubbleHeight.value = 0;
+  }, [bubbleVisible, bubbleWidth, bubbleHeight]);
+
+  // The bubble may never be wider than the band the clamp above can place it
+  // in, even on a narrow phone.
+  const bubbleMaxWidth = Math.max(140, Math.min(BUBBLE_MAX_WIDTH, width - 2 * EDGE_MARGIN));
+  const progressRatio =
+    todoProgress === null ? 0 : todoProgress.completed / Math.max(1, todoProgress.total);
+
+  if (HIDDEN_ROUTES.has(pathname)) return null;
 
   return (
     // `box-none` keeps the rest of the screen interactive: only the pet cell
-    // and its bubble receive touches.
+    // receives touches. The bubble is a sibling here, on purpose — see the
+    // module note about clipping.
     <View pointerEvents="box-none" style={styles.host}>
       <GestureDetector gesture={gesture}>
         <Animated.View
@@ -523,38 +929,22 @@ export function PetOverlay() {
           style={[styles.pet, petStyle]}
         >
           <Image source={standee} contentFit="contain" style={[styles.standee, styles.shadow]} />
-          {bubbleVisible && typed && settings.chat ? (
-            <View style={styles.bubble} pointerEvents="none">
-              <Text style={styles.bubbleText}>{typed}</Text>
+        </Animated.View>
+      </GestureDetector>
+      {bubbleVisible && typed ? (
+        <Animated.View
+          onLayout={measureBubble}
+          pointerEvents="none"
+          style={[styles.bubble, { maxWidth: bubbleMaxWidth }, bubbleStyle]}
+        >
+          <Text style={styles.bubbleText}>{typed}</Text>
+          {todoProgress !== null ? (
+            <View style={styles.progressTrack}>
+              <View style={[styles.progressFill, { width: `${progressRatio * 100}%` }]} />
             </View>
           ) : null}
         </Animated.View>
-      </GestureDetector>
-      <PetMenu
-        visible={panel === "menu"}
-        gamesEnabled={settings.game}
-        onAction={handleAction}
-        onClose={() => setPanel(null)}
-      />
-      <SettingsPanel
-        visible={panel === "settings"}
-        settings={settings}
-        onChange={(next: PetSettings) => {
-          const current = saveRef.current;
-          if (current === null) return;
-          persistSave({ ...current, settings: next });
-        }}
-        onClose={() => setPanel(null)}
-      />
-      <GrowthPanel
-        visible={panel === "growth"}
-        growth={(save?.growth as GrowthState | null) ?? null}
-        achievements={core.ACHIEVEMENTS}
-        weekSignin={save?.growth ? core.computeWeekSignin(save.growth).weekSignin : null}
-        onClose={() => setPanel(null)}
-      />
-      <BubbleGame visible={panel === "bubble-game"} onClose={() => setPanel(null)} />
-      <CatchGame visible={panel === "catch-game"} onClose={() => setPanel(null)} />
+      ) : null}
     </View>
   );
 }
@@ -581,12 +971,13 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.22,
     shadowRadius: 8,
   },
+  // Positioned from `bubbleStyle`; (0, 0) here is only the anchor the transform
+  // is applied to. No fixed width: the text sizes it, `maxWidth` wraps it.
   bubble: {
     position: "absolute",
-    bottom: PET_SIZE + 10,
-    left: -40,
-    minWidth: PET_SIZE,
-    maxWidth: 250,
+    left: 0,
+    top: 0,
+    flexShrink: 0,
     paddingHorizontal: 10,
     paddingVertical: 7,
     borderRadius: 12,
@@ -596,5 +987,17 @@ const styles = StyleSheet.create({
     color: "#e8edf4",
     fontSize: 13,
     lineHeight: 18,
+  },
+  progressTrack: {
+    height: 3,
+    marginTop: 6,
+    borderRadius: 2,
+    overflow: "hidden",
+    backgroundColor: "rgba(232, 237, 244, 0.2)",
+  },
+  progressFill: {
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: "#8fbcff",
   },
 });
