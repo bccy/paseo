@@ -246,14 +246,19 @@ export function PetOverlay() {
   }, []);
 
   // Typewriter: reveal the current line character by character, then hold it.
+  //
+  // The bubble's lifetime is owned by the hold timer, NOT by `speak`. The state
+  // machine ticks every TICK_MS and reports `speak: true` only on the tick that
+  // produced a new line, flipping it back to false on the next one — keying the
+  // bubble off `speak` therefore dismissed it after a single tick, before the
+  // typewriter had even finished. Only a *change of line* starts a bubble.
   const [typed, setTyped] = useState("");
   const [bubbleVisible, setBubbleVisible] = useState(false);
+  const lastLineRef = useRef<string>("");
   useEffect(() => {
     const line = petState.line;
-    if (!petState.speak || !line) {
-      setBubbleVisible(false);
-      return;
-    }
+    if (!line || line === lastLineRef.current) return;
+    lastLineRef.current = line;
     setBubbleVisible(true);
     setTyped("");
     let index = 0;
@@ -271,7 +276,7 @@ export function PetOverlay() {
     return () => {
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [petState.line, petState.speak]);
+  }, [petState.line]);
 
   // Motion drivers. `breathe` and `sway` loop forever; `hop` and `poseIn` are
   // one-shots retriggered by a tap or a pose change.
@@ -438,7 +443,7 @@ export function PetOverlay() {
           accessibilityLabel="Desk pet"
           style={[styles.pet, petStyle]}
         >
-          <Image source={standee} contentFit="contain" style={styles.standee} />
+          <Image source={standee} contentFit="contain" style={[styles.standee, styles.shadow]} />
           {bubbleVisible && typed ? (
             <View style={styles.bubble} pointerEvents="none">
               <Text style={styles.bubbleText}>{typed}</Text>
@@ -464,6 +469,13 @@ const styles = StyleSheet.create({
   standee: {
     width: PET_SIZE,
     height: PET_SIZE,
+  },
+  // Upstream: drop-shadow(0 6px 8px 22%). RN/iOS spells the same thing out.
+  shadow: {
+    shadowColor: "#000000",
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.22,
+    shadowRadius: 8,
   },
   bubble: {
     position: "absolute",
