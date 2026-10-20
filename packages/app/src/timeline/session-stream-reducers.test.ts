@@ -1095,6 +1095,46 @@ describe("processTimelineResponse", () => {
     );
   });
 
+  it("merges pre-baseline reasoning deltas before a bootstrap page replaces them", () => {
+    let currentTail: StreamItem[] = [];
+    let currentHead: StreamItem[] = [];
+    for (const [index, text] of ["First", "Second", "Third"].entries()) {
+      const step = processAgentStreamEvent({
+        ...baseStreamInput,
+        event: makeTimelineEvent(text, "reasoning"),
+        seq: index + 1,
+        epoch: "epoch-1",
+        currentTail,
+        currentHead,
+        currentCursor: undefined,
+        hasAuthoritativeBaseline: false,
+        timestamp: new Date(1000 + index + 1),
+      });
+      currentTail = step.tail;
+      currentHead = step.head;
+    }
+    expect(currentHead.filter((item) => item.kind === "thought")).toHaveLength(1);
+
+    const result = processTimelineResponse({
+      ...baseTimelineInput,
+      currentTail,
+      currentHead,
+      isInitializing: true,
+      hasActiveInitDeferred: true,
+      payload: {
+        ...baseTimelineInput.payload,
+        direction: "tail",
+        startCursor: { seq: 1 },
+        endCursor: { seq: 3 },
+        entries: [makeTimelineEntry(1, "FirstSecondThird", "reasoning", 3)],
+      },
+    });
+
+    const thoughts = [...result.tail, ...result.head].filter((item) => item.kind === "thought");
+    expect(thoughts).toHaveLength(1);
+    expect(thoughts[0]).toMatchObject({ kind: "thought", text: "FirstSecondThird" });
+  });
+
   it("uses the timeline entry timestamp as canonical", () => {
     const result = processTimelineResponse({
       ...baseTimelineInput,
@@ -3857,6 +3897,33 @@ describe("processAgentStreamEvent", () => {
     expect(result.cursorChanged).toBe(false);
     expect(result.cursor).toBeNull();
     expect(result.sideEffects).toEqual([]);
+  });
+
+  it("merges pre-baseline streamed reasoning deltas into one head thought", () => {
+    let currentTail: StreamItem[] = [];
+    let currentHead: StreamItem[] = [];
+    const deltas = ["First", "Second", "Third"];
+    for (const [index, text] of deltas.entries()) {
+      const result = processAgentStreamEvent({
+        ...baseStreamInput,
+        event: makeTimelineEvent(text, "reasoning"),
+        seq: index + 1,
+        epoch: "epoch-1",
+        currentTail,
+        currentHead,
+        currentCursor: undefined,
+        hasAuthoritativeBaseline: false,
+        timestamp: new Date(1000 + index + 1),
+      });
+      currentTail = result.tail;
+      currentHead = result.head;
+      expect(result.cursor).toBeNull();
+      expect(result.cursorChanged).toBe(false);
+    }
+
+    const thoughts = [...currentTail, ...currentHead].filter((item) => item.kind === "thought");
+    expect(thoughts).toHaveLength(1);
+    expect(thoughts[0]).toMatchObject({ kind: "thought", text: "FirstSecondThird" });
   });
 
   it("reconciles a pre-bootstrap echo with its submitted row", () => {
