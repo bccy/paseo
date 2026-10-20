@@ -24,10 +24,18 @@ env:
 
 jobs:
   build:
-    runs-on: macos-26          # Xcode 26.x；避开 Xcode 27 的 UIScene 启动崩溃
+    runs-on: macos-15          # macos-26 is being cancelled while queued; macos-15 also ships Xcode 26.x
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+
+      - name: Select Xcode 26 (macos-15 defaults to an older one)
+        run: |
+          set -euo pipefail
+          XCODE=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
 
       - uses: actions/setup-node@v4
         with:
