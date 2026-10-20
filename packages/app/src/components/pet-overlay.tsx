@@ -174,16 +174,18 @@ const EGG_MIN_MS = 45_000;
 const EGG_MAX_MS = 120_000;
 
 /**
- * Live agent activity -> standee, in the session store's own priority order
- * (`needs_input` and `failed` outrank `running`, which outranks `attention`,
- * then `done`). Mirrors `STATUS_BUCKET_PRIORITY` in `utils/sidebar-agent-state`.
+ * Live agent activity -> standee. Only buckets that describe something actually
+ * happening appear here, in the store's own priority order. `done` is
+ * deliberately absent: it is the bucket's *fallback* (the last `return` of
+ * `deriveAgentStateBucket` in `@getpaseo/protocol`), so it means "nothing is
+ * happening", not "just finished". Mapping it to a pose would leave the pet
+ * celebrating forever whenever a workspace is merely idle.
  */
 const ACTIVITY_POSES: ReadonlyArray<{ status: string; pose: PoseName }> = [
   { status: "needs_input", pose: "waiting" },
   { status: "failed", pose: "failure" },
   { status: "running", pose: "tool" },
   { status: "attention", pose: "curious" },
-  { status: "done", pose: "celebrate" },
 ];
 
 /** Tap reactions, picked at random so repeated taps do not repeat the same art. */
@@ -306,18 +308,42 @@ export function PetOverlay() {
   const workspaceStatuses = useWorkspaceStatusesForBadges();
 
   const [reaction, setReaction] = useState<PoseName | null>(null);
+  const [celebration, setCelebration] = useState<PoseName | null>(null);
   const [egg, setEgg] = useState<PoseName | null>(null);
   const [clockPose, setClockPose] = useState<PoseName | null>(() => calendarPose(new Date()));
 
-  const activityPose = useMemo<PoseName>(() => {
+  /**
+   * The winning activity bucket, in the store's own priority order, or null
+   * when no workspace reports one. Kept as the raw bucket name so the
+   * running -> done edge can be observed below.
+   */
+  const activityBucket = useMemo<string | null>(() => {
     const seen = new Set(workspaceStatuses);
     for (const entry of ACTIVITY_POSES) {
-      if (seen.has(entry.status)) return entry.pose;
+      if (seen.has(entry.status)) return entry.status;
     }
-    return "idle-cute";
+    return null;
   }, [workspaceStatuses]);
 
-  const pose: PoseName = reaction ?? egg ?? clockPose ?? activityPose;
+  /** Anything that is not an active bucket rests at the idle standee. */
+  const activityPose = useMemo<PoseName>(() => {
+    const entry = ACTIVITY_POSES.find((candidate) => candidate.status === activityBucket);
+    return entry?.pose ?? "idle-cute";
+  }, [activityBucket]);
+
+  const pose: PoseName = reaction ?? celebration ?? egg ?? clockPose ?? activityPose;
+
+  // Celebrate on the running -> done edge only. `done` is the resting bucket, so
+  // a level-triggered mapping would celebrate forever; this is edge-triggered.
+  const previousBucket = useRef<string | null>(null);
+  useEffect(() => {
+    const wasRunning = previousBucket.current === "running";
+    previousBucket.current = activityBucket;
+    if (!wasRunning || activityBucket !== "done") return;
+    setCelebration("celebrate");
+    const timer = setTimeout(() => setCelebration(null), 2500);
+    return () => clearTimeout(timer);
+  }, [activityBucket]);
 
   // Motion drivers. `breathe` and `sway` loop forever; `hop` and `poseIn` are
   // one-shots retriggered by a tap or a pose change.
