@@ -17,10 +17,7 @@
  * owns the asset table and the mapping tables; `resolveOverlayPose` there
  * decides priority. The layers are:
  *   - the state machine's own pose (`running` / `thinking` / `failure` /
- *     `success` / `waiting` / `curious` are never overwritten). Its `tool` and
- *     `thinking` inputs come from the conversation's own stream — a tool call
- *     whose status is still `running`, and a thought that is still streaming —
- *     not from the workspace-level status buckets, which lag the stream;
+ *     `success` / `waiting` / `curious` are never overwritten);
  *   - a tap (whole standee is one button) or a drag — direct interaction;
  *   - while idle only: a recent tool call picks a work-* standee, a recent user
  *     message picks a keyword/meme standee, a completed todo step picks a
@@ -79,7 +76,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useShallow } from "zustand/shallow";
 import { useSessionStore, type SessionState } from "@/stores/session-store";
 import { useWorkspaceStatusesForBadges } from "@/stores/session-store-hooks";
-import type { AgentToolCallData, StreamItem, TodoEntry, UserMessageItem } from "@/types/stream";
+import type { StreamItem, TodoEntry, ToolCallItem, UserMessageItem } from "@/types/stream";
 import {
   IDLE_RANDOM_MAX_MS,
   IDLE_RANDOM_MIN_MS,
@@ -176,37 +173,24 @@ interface PetStoreSource {
 
 /** What the active conversation is doing, reduced to the fields the pet needs. */
 interface PetActivity {
-  /** Name of the newest agent tool call that is still executing, if any. */
+  /** Name of the newest tool call in the turn, if the turn has one yet. */
   toolName: string | null;
-  /** When that running tool call was issued (ms). */
+  /** When that tool call was issued (ms). */
   toolAt: number;
-  /**
-   * Name of the newest agent tool call of *any* status (completed / failed too).
-   * This is the idle-branch "she just finished this" input, separate from the
-   * running one above.
-   */
-  recentToolName: string | null;
-  /** When that most recent tool call started (ms). */
-  recentToolAt: number;
-  /** The active turn is open (`agent.turn.phase === "open"`). */
-  turnOpen: boolean;
-  /** A thought is streaming right now (newest item is a loading thought). */
-  thought: boolean;
   /** `matchKeyword` id for the newest user message, or null when none matched. */
   keywordId: string | null;
   /** When the newest user message was sent (ms). */
   userAt: number;
+  /** The newest stream item is a thought that is still streaming. */
+  thought: boolean;
 }
 
 const EMPTY_ACTIVITY: PetActivity = {
   toolName: null,
   toolAt: 0,
-  recentToolName: null,
-  recentToolAt: 0,
-  turnOpen: false,
-  thought: false,
   keywordId: null,
   userAt: 0,
+  thought: false,
 };
 
 interface ActiveAgent {
@@ -261,45 +245,24 @@ function pickActiveAgent(state: PetStoreSource): ActiveAgent | null {
   return focusedBest ?? recentBest;
 }
 
-interface AgentToolMoment {
-  name: string;
-  at: number;
+function toolCallName(item: ToolCallItem): string | null {
+  const payload = item.payload;
+  if (payload.source === "agent") return payload.data.name;
+  return payload.data.toolName;
 }
 
-/**
- * The newest agent tool call of the current turn that `accept` matches, or null.
- *
- * Only agent tool calls count: orchestrator calls are host-side bookkeeping, not
- * work the pet should mirror.
- *
- * The walk stops at the turn boundary, but a **steering** message does not cross
- * it: when the user steers a running tool, the message is sent into the open
- * turn (`turnId === openTurnId`) while the tool it steers is still the current
- * one, so the scan continues past it. A message from a different turn (or an
- * unknown turn) really is a new prompt and ends the search — a stale `running`
- * flag left over from the previous turn must not leak into the next.
- */
-function latestAgentToolCall(
-  session: SessionState,
-  agentId: string,
-  openTurnId: string | null,
-  accept: (data: AgentToolCallData) => boolean,
-): AgentToolMoment | null {
+/** Newest tool call of the current turn, or null when the turn issued none yet. */
+function latestToolCall(session: SessionState, agentId: string): ToolCallItem | null {
   const streams = [session.agentStreamHead.get(agentId), session.agentStreamTail.get(agentId)];
   for (const items of streams) {
     if (items === undefined) continue;
     for (let index = items.length - 1; index >= 0; index -= 1) {
       const item = items[index];
       if (item === undefined) continue;
-      if (item.kind === "user_message") {
-        // Steering stays inside the open turn; anything else is a new turn.
-        if (openTurnId !== null && item.turnId === openTurnId) continue;
-        return null;
-      }
-      if (item.kind !== "tool_call") continue;
-      if (item.payload.source !== "agent") continue;
-      if (!accept(item.payload.data)) continue;
-      return { name: item.payload.data.name, at: item.timestamp.getTime() };
+      if (item.kind === "tool_call") return item;
+      // The newest user message marks the start of a new turn: tool calls
+      // before it belong to the previous one and must not be shown again.
+      if (item.kind === "user_message") return null;
     }
   }
   return null;
@@ -338,46 +301,20 @@ function selectPetActivity(state: PetStoreSource): PetActivity {
 
   const userMessage = latestUserMessage(session, agentId);
   const userAt = userMessage?.timestamp.getTime() ?? 0;
-
-  // The open turn is what makes a steering message distinguishable from a new
-  // prompt, so resolve it before scanning the stream.
-  const agent = session.agents.get(agentId);
-  const turn = agent?.turn;
-  const turnOpen = turn?.phase === "open";
-  // `turnId` is typed `string | null`; keep the coalesce so an old snapshot that
-  // omits it degrades to "unknown turn" instead of comparing `undefined === undefined`.
-  const openTurnId =
-    turn !== undefined && turn.phase === "open" ? (turn.turnId ?? null) : null;
-
-  // Is a tool executing *right now*? Only its own status can answer that.
-  const runningTool = latestAgentToolCall(
-    session,
-    agentId,
-    openTurnId,
-    (data) => data.status === "running",
-  );
-  // The newest call of any status feeds the idle-branch "she just finished this"
-  // standee; it is a separate input from the running tool above.
-  const recentTool = latestAgentToolCall(session, agentId, openTurnId, () => true);
-
+  const toolCall = latestToolCall(session, agentId);
+  const toolAt = toolCall?.timestamp.getTime() ?? 0;
+  // A tool call from before the newest user message belongs to the previous
+  // turn; using it would replay the wrong standee for the new message.
+  const toolName = toolCall !== null && toolAt >= userAt ? toolCallName(toolCall) : null;
   const latest = latestStreamItem(session, agentId);
-  // Streaming thought = the newest stream item is a thought that has not been
-  // finalized yet, in a turn that is still open. The turn check is what keeps a
-  // thought left behind by a finished turn from pinning the thinking pose while
-  // the pet is idle.
-  const thought =
-    turnOpen && latest !== undefined && latest.kind === "thought" && latest.status === "loading";
   const keywordId = userMessage === null ? null : core.matchKeyword(userMessage.text, true);
 
   return {
-    toolName: runningTool?.name ?? null,
-    toolAt: runningTool?.at ?? 0,
-    recentToolName: recentTool?.name ?? null,
-    recentToolAt: recentTool?.at ?? 0,
-    turnOpen,
-    thought,
+    toolName,
+    toolAt: toolName === null ? 0 : toolAt,
     keywordId,
     userAt,
+    thought: latest?.kind === "thought",
   };
 }
 
@@ -433,18 +370,14 @@ export function PetOverlay() {
   const { top: topInset, bottom: bottomInset } = useSafeAreaInsets();
   const pathname = usePathname();
 
-  // Host signals from Paseo's workspace buckets. These buckets are turn-level
-  // semantics that they still answer honestly: `needs_input`, `failed` and
-  // `attention`. The `running` bucket is deliberately NOT used for the `tool`
-  // signal: it is workspace-level and lagging (it may still say `done` while a
-  // tool is executing), and treating it as "a tool is running" pinned `tool`
-  // true and hid `thinking` forever (computeState priority is
-  // error > tool > thinking). Both `tool` and `thinking` now come from the
-  // conversation's stream, in the tick below.
+  // Host signals: Paseo's own workspace buckets, mapped onto the names the
+  // upstream state machine expects. `thinking` has no bucket of its own; the
+  // tick derives it from the stream (a thought item streaming in an open turn).
   const workspaceStatuses = useWorkspaceStatusesForBadges();
   const signals = useMemo<Record<string, unknown>>(() => {
     const seen = new Set(workspaceStatuses);
     return {
+      tool: seen.has("running"),
       waiting: seen.has("needs_input"),
       error: seen.has("failed"),
       curiousAt: seen.has("attention") ? Date.now() : undefined,
@@ -455,8 +388,7 @@ export function PetOverlay() {
   const signalsRef = useRef(signals);
   signalsRef.current = signals;
 
-  // The active conversation's running tool call / streaming thought / newest
-  // user message.
+  // The active conversation's newest tool call / user message / thought.
   const activity = useSessionStore(useShallow(selectPetActivity));
   const activityRef = useRef(activity);
   activityRef.current = activity;
@@ -597,10 +529,7 @@ export function PetOverlay() {
       timer = setTimeout(() => {
         const rawPose = (stateRef.current as PetState | undefined)?.pose;
         const lastActivity = Math.max(lastInteractionRef.current, lastStreamActivityRef.current);
-        // An open turn means the agent is working: keep the state pose instead
-        // of swapping in idle variety mid-turn.
         if (
-          !activityRef.current.turnOpen &&
           rawPose !== undefined &&
           isIdleSeriesPose(rawPose) &&
           Date.now() - lastActivity >= IDLE_RANDOM_MIN_MS
@@ -621,35 +550,21 @@ export function PetOverlay() {
     const timer = setInterval(() => {
       const now = Date.now();
       const activityNow = activityRef.current;
-      // `tool` = a tool call is executing right now (its own status says so)
-      // AND the turn it belongs to is still open. The turn check is what keeps a
-      // `running` flag that a canceled turn never finalized from pinning the
-      // working standee forever after the turn ended.
-      //
-      // `thinking` = a thought is streaming and no tool is running. Both are
-      // per-conversation stream facts, so computeState's
-      // error > tool > thinking priority can actually reach `thinking` — with
-      // the old workspace-bucket `tool` it never could.
-      const runningToolName = activityNow.turnOpen ? activityNow.toolName : null;
-      const tool = runningToolName !== null;
-      const thinking = !tool && activityNow.thought;
-      if (activityNow.turnOpen) {
-        // Keep the "last activity" clock fresh while the turn is open, so she
-        // does not drop straight into the AFK pose the moment the turn ends.
-        lastStreamActivityRef.current = now;
-      }
+      // A workspace bucket says only that a turn is open. While a thought item
+      // is streaming she is thinking, not running a tool: split that out so the
+      // state machine itself picks the thinking standee.
+      const workspaceRunning = signalsRef.current.tool === true;
+      const thinking = workspaceRunning && activityNow.thought;
       const next = core.computeState(
         stateRef.current,
         {
           ...signalsRef.current,
-          tool,
+          tool: workspaceRunning && !thinking,
           thinking,
-          // A pat resets the upstream idle clock; an open turn does too, so she
-          // does not doze off while the agent is still working. The workspace
-          // buckets carry no interaction timestamp of their own.
-          lastInteraction: activityNow.turnOpen
-            ? now
-            : Math.max(lastInteractionRef.current, lastStreamActivityRef.current),
+          // A pat resets the upstream idle clock; so does real work in the
+          // active conversation, so she does not doze off mid-turn. The
+          // workspace buckets carry no interaction timestamp of their own.
+          lastInteraction: Math.max(lastInteractionRef.current, lastStreamActivityRef.current),
           // The module only accepts a success inside its own 2s window, so a
           // stale timestamp is harmless.
           successAt: successAtRef.current,
@@ -664,18 +579,10 @@ export function PetOverlay() {
         statePose: next.pose,
         dragging: now < dragUntilRef.current,
         pat: patPoseRef.current,
-        // Two separate inputs, two different questions: the running tool (no
-        // recency window, so a long command keeps its standee) and the most
-        // recent call of any status (60s window, the "she just did this" idle
-        // pose). The resolver owns which branch reads which.
         tool:
-          runningToolName === null
+          activityNow.toolName === null
             ? null
-            : { pose: resolveToolPose(runningToolName), at: activityNow.toolAt },
-        recentTool:
-          activityNow.recentToolName === null
-            ? null
-            : { pose: resolveToolPose(activityNow.recentToolName), at: activityNow.recentToolAt },
+            : { pose: resolveToolPose(activityNow.toolName), at: activityNow.toolAt },
         keyword: keywordPoseRef.current,
         celebration: celebrationRef.current,
         idleRandom: idleRandomRef.current,
