@@ -40,7 +40,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Image } from "expo-image";
 import { usePathname } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { StyleSheet, useWindowDimensions, View } from "react-native";
+import { Keyboard, Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
   Easing,
@@ -54,7 +54,16 @@ import Animated, {
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useShallow } from "zustand/shallow";
+import { resolveFocusedChatTarget } from "@/composer/focused-chat-target";
+import { useDraftStore } from "@/stores/draft-store";
+import {
+  useActiveWorkspaceSelection,
+  useLastWorkspaceSelection,
+} from "@/stores/navigation-active-workspace-store";
 import { useSessionStore, type SessionState } from "@/stores/session-store";
+import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
+import { useWorkspaceTabSwitcherStore } from "@/stores/workspace-tab-switcher-store";
+import { buildWorkspaceTabPersistenceKey } from "@/workspace-tabs/model";
 import type { AgentToolCallData, StreamItem, TodoEntry, UserMessageItem } from "@/types/stream";
 import {
   IDLE_RANDOM_MAX_MS,
@@ -66,12 +75,16 @@ import {
   celebrationPose,
   isIdleSeriesPose,
   pickIdleRandomPose,
-  pickPatPose,
   pickRandomMemePose,
+  nextPatPose,
   resolveOverlayPose,
   resolveToolPose,
+  WORKING_PAT_POSE,
   type PoseName,
 } from "../pets/pose-map";
+import { insertLatestPhotoIntoDraft } from "../pets/pet-latest-photo";
+import { buildPetSlashCommands, type PetSlashCommand } from "../pets/pet-slash-commands";
+import { resolveTapBurstAction, TAP_BURST_WINDOW_MS } from "../pets/pet-taps";
 
 // The upstream state machine is a UMD module with no DOM dependencies. Vendored
 // verbatim so its pose rules stay byte-identical to the source instead of
@@ -107,6 +120,12 @@ const ART_TO_SCREEN = PET_SIZE / 512;
 const STORAGE_KEY = "paseo.pet.position.v1";
 /** Keep the pet clear of the very edge so nothing is clipped by the window. */
 const EDGE_MARGIN = 10;
+/**
+ * Vertical space reserved at the bottom for the composer. The pet must never
+ * rest below the input bar: when the keyboard opens the bar rises with it, and
+ * a standee parked at the bottom would end up hidden behind the keyboard.
+ */
+const COMPOSER_GUARD = 64;
 /** Screens where a pet would be noise rather than company. */
 const HIDDEN_ROUTES = new Set(["/welcome", "/pair-scan", "/open-project"]);
 
@@ -417,7 +436,7 @@ function selectMostRecentTodoList(state: PetStoreSource): TodoListSnapshot | nul
 
 export function PetOverlay() {
   const { width, height } = useWindowDimensions();
-  const { top: topInset } = useSafeAreaInsets();
+  const { top: topInset, bottom: bottomInset } = useSafeAreaInsets();
   const pathname = usePathname();
 
   // The active conversation's running/recent tool call, user message, thought
@@ -454,6 +473,31 @@ export function PetOverlay() {
     return { agentId, completed, total: tasks.length };
   }, [todoList]);
 
+  // ---- focused chat + command menu -----------------------------------------
+  // The overlay lives outside the composer, so its actions resolve the focused
+  // chat through the same global stores the "add file to chat" flow uses. The
+  // active workspace wins; the last-visited workspace keeps the actions usable
+  // from screens without a workspace route (e.g. the project list).
+  const activeWorkspaceSelection = useActiveWorkspaceSelection();
+  const lastWorkspaceSelection = useLastWorkspaceSelection();
+  const chatSelection = activeWorkspaceSelection ?? lastWorkspaceSelection;
+  const workspaceKey = chatSelection ? buildWorkspaceTabPersistenceKey(chatSelection) : null;
+  const workspaceLayout = useWorkspaceLayoutStore((state) =>
+    workspaceKey === null ? undefined : state.layoutByWorkspace[workspaceKey],
+  );
+  const focusedChat = useMemo(
+    () =>
+      chatSelection === null
+        ? null
+        : resolveFocusedChatTarget({ serverId: chatSelection.serverId, layout: workspaceLayout }),
+    [chatSelection, workspaceLayout],
+  );
+  const focusedDraftKeyRef = useRef<string | null>(null);
+  focusedDraftKeyRef.current = focusedChat?.draftKey ?? null;
+
+  const [commandMenuVisible, setCommandMenuVisible] = useState(false);
+  const slashCommands = useMemo<PetSlashCommand[]>(() => buildPetSlashCommands(), []);
+
   // ---- pose trigger state --------------------------------------------------
   // These are refs, not state: the 500ms tick resolves the pose and is the only
   // place that repaints, so the trigger effects must not each cause a render.
@@ -465,6 +509,8 @@ export function PetOverlay() {
   const idleRandomRef = useRef<{ pose: PoseName; pickedAt: number } | null>(null);
   /** Active pat reaction. */
   const patPoseRef = useRef<{ pose: PoseName; until: number } | null>(null);
+  /** Monotonic pat counter; drives the non-repeating standee rotation. */
+  const patRotationRef = useRef(0);
   /** While dragging (and briefly after) the pickup standee wins. */
   const draggingRef = useRef(false);
   const dragUntilRef = useRef(0);
@@ -670,10 +716,28 @@ export function PetOverlay() {
   const originX = useSharedValue(0);
   const originY = useSharedValue(0);
 
+  // The composer owns the bottom of the screen and rises with the keyboard.
+  // Track the keyboard so the pet can be clamped above the input bar instead of
+  // ending up hidden behind it.
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  useEffect(() => {
+    const show = Keyboard.addListener("keyboardWillShow", (event) =>
+      setKeyboardHeight(event.endCoordinates.height),
+    );
+    const hide = Keyboard.addListener("keyboardWillHide", () => setKeyboardHeight(0));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
+
   const minX = EDGE_MARGIN;
   const maxX = Math.max(EDGE_MARGIN, width - PET_SIZE - EDGE_MARGIN);
   const minY = topInset + EDGE_MARGIN;
-  const maxY = Math.max(minY, height - PET_SIZE - EDGE_MARGIN);
+  const maxY = Math.max(
+    minY,
+    height - PET_SIZE - EDGE_MARGIN - COMPOSER_GUARD - keyboardHeight,
+  );
 
   // Upstream soft set: wm-breathe (-4px over 3.4s) and wm-sway (0 -> 1.2deg / 6s).
   useEffect(() => {
@@ -756,25 +820,105 @@ export function PetOverlay() {
   /**
    * A tap anywhere on the standee is a pat. The whole 96pt cell is one button:
    * the upstream build's head / belly / tail hit zones are intentionally gone.
-   * Tapping plays the hop, resets the upstream idle clock, and picks a reaction
-   * standee — one of the three react-* poses, or the working pat while a
-   * workspace is busy.
+   *
+   * The reaction standee is computed and applied **here**, not by the 500ms
+   * state-machine tick (waiting for the tick made every tap feel laggy). The
+   * same pose goes into `patPoseRef` so the tick's `resolveOverlayPose` keeps it
+   * until the hold expires.
+   *
+   * Consecutive pats rotate through `PAT_TAP_POSES` instead of picking randomly:
+   * with only three random standees taps repeated often enough to look like
+   * nothing happened. While the agent is busy the working pat still wins.
    */
   const react = useCallback(() => {
     const now = Date.now();
     lastInteractionRef.current = now;
     const rawPose = (stateRef.current as MachineSnapshot | undefined)?.pose;
     const working = rawPose === "running" || rawPose === "thinking";
-    patPoseRef.current = { pose: pickPatPose(working), until: now + PAT_HOLD_MS };
+    const rotation = patRotationRef.current;
+    patRotationRef.current = rotation + 1;
+    const pose = working ? WORKING_PAT_POSE : nextPatPose(rotation);
+    patPoseRef.current = { pose, until: now + PAT_HOLD_MS };
     idleRandomRef.current = null;
     playHop();
+    // Apply immediately instead of waiting for the next tick.
+    setPetPose((current) => (current === pose ? current : pose));
   }, [playHop]);
+
+  // ---- tap bursts, photo, command center, command menu ---------------------
+  // Counting instead of `Exclusive(doubleTap, singleTap)`: a single tap must pat
+  // immediately; a burst is only *upgraded* to a double (photo) or triple
+  // (command center) once the 300ms window closes.
+  // The count lives in a ref, not state: nothing renders from it, and keeping it
+  // out of state keeps `handleTapEnd` (and therefore the gesture object) stable
+  // across taps.
+  const tapBurstCountRef = useRef(0);
+  const tapBurstTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const resetTapBurst = useCallback(() => {
+    tapBurstCountRef.current = 0;
+    if (tapBurstTimerRef.current !== null) {
+      clearTimeout(tapBurstTimerRef.current);
+      tapBurstTimerRef.current = null;
+    }
+  }, []);
+
+  const insertLatestPhoto = useCallback(() => {
+    void insertLatestPhotoIntoDraft(focusedDraftKeyRef.current);
+  }, []);
+
+  const openWorkspaceTabSwitcher = useCallback(() => {
+    // Triple tap mirrors the compact header's [3] button: it opens the
+    // workspace tab panel, not the desktop Command Center.
+    useWorkspaceTabSwitcherStore.getState().open();
+  }, []);
+
+  const openCommandMenu = useCallback(() => {
+    resetTapBurst();
+    setCommandMenuVisible(true);
+  }, [resetTapBurst]);
+
+  const closeCommandMenu = useCallback(() => setCommandMenuVisible(false), []);
+
+  const selectSlashCommand = useCallback(
+    (command: PetSlashCommand) => {
+      setCommandMenuVisible(false);
+      const draftKey = focusedDraftKeyRef.current;
+      if (draftKey === null) return;
+      useDraftStore.getState().requestTextInsert({ draftKey, text: command.insert });
+    },
+    [],
+  );
+
+  const handleTapEnd = useCallback(() => {
+    tapBurstCountRef.current += 1;
+    const nextCount = tapBurstCountRef.current;
+    if (tapBurstTimerRef.current !== null) clearTimeout(tapBurstTimerRef.current);
+    // The first tap reacts right away; only the upgrade waits for the window.
+    if (nextCount === 1) react();
+    tapBurstTimerRef.current = setTimeout(() => {
+      const count = tapBurstCountRef.current;
+      tapBurstCountRef.current = 0;
+      tapBurstTimerRef.current = null;
+      const action = resolveTapBurstAction(count);
+      if (action === "double") insertLatestPhoto();
+      else if (action === "triple") openWorkspaceTabSwitcher();
+    }, TAP_BURST_WINDOW_MS);
+  }, [insertLatestPhoto, openWorkspaceTabSwitcher, react]);
+
+  // Never leave a burst timer behind when the overlay unmounts.
+  useEffect(() => {
+    return () => {
+      if (tapBurstTimerRef.current !== null) clearTimeout(tapBurstTimerRef.current);
+    };
+  }, []);
 
   const dragStarted = useCallback(() => {
     draggingRef.current = true;
     dragUntilRef.current = Number.POSITIVE_INFINITY;
     idleRandomRef.current = null;
-  }, []);
+    // A drag is not a click: drop any pending burst count.
+    resetTapBurst();
+  }, [resetTapBurst]);
 
   const dragEnded = useCallback(() => {
     if (!draggingRef.current) return;
@@ -811,11 +955,32 @@ export function PetOverlay() {
     [minX, maxX, minY, maxY, persist, dragStarted, dragEnded],
   );
 
-  const tap = useMemo(() => Gesture.Tap().maxDistance(12).onEnd(() => runOnJS(react)()), [react]);
+  // Long press opens the slash-command menu. `Exclusive` gives it priority over
+  // the tap, so holding the standee never fires a pat on release.
+  const longPress = useMemo(
+    () =>
+      Gesture.LongPress()
+        .minDuration(450)
+        .onStart(() => {
+          runOnJS(openCommandMenu)();
+        }),
+    [openCommandMenu],
+  );
 
-  // A drag must not be mistaken for a tap. The long-press menu used to win over
-  // both; with the menu gone the pan/tap pair is all that is left.
-  const gesture = useMemo(() => Gesture.Exclusive(pan, tap), [pan, tap]);
+  // `onEnd(event, success)`: RNGH also calls `onEnd` for canceled gestures, so
+  // the count must only advance when the tap actually succeeded.
+  const tap = useMemo(
+    () =>
+      Gesture.Tap()
+        .maxDistance(12)
+        .onEnd((_event, success) => {
+          if (success) runOnJS(handleTapEnd)();
+        }),
+    [handleTapEnd],
+  );
+
+  // Priority: long press -> drag -> tap. A drag must not be mistaken for a tap.
+  const gesture = useMemo(() => Gesture.Exclusive(longPress, pan, tap), [longPress, pan, tap]);
 
   const petStyle = useAnimatedStyle(() => ({
     opacity: 0.2 + 0.8 * poseIn.value,
@@ -850,6 +1015,39 @@ export function PetOverlay() {
           <Image source={standee} contentFit="contain" style={[styles.standee, styles.shadow]} />
         </Animated.View>
       </GestureDetector>
+      {commandMenuVisible ? (
+        <View style={[styles.menuBackdrop, { paddingBottom: bottomInset + 12 }]}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="关闭命令菜单"
+            onPress={closeCommandMenu}
+            style={styles.menuDismiss}
+          />
+          <Pressable style={styles.menuSheet} onPress={() => undefined}>
+            <Text style={styles.menuTitle}>桌宠命令（选中后填入输入框）</Text>
+            {slashCommands.map((command) => (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`${command.label}：填入 ${command.insert}`}
+                key={command.name}
+                onPress={() => selectSlashCommand(command)}
+                style={({ pressed }) => [styles.menuItem, pressed ? styles.menuItemPressed : null]}
+              >
+                <Text style={styles.menuItemLabel}>{command.label}</Text>
+                <Text style={styles.menuItemCommand}>{command.insert}</Text>
+              </Pressable>
+            ))}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="关闭命令菜单"
+              onPress={closeCommandMenu}
+              style={styles.menuItem}
+            >
+              <Text style={styles.menuCancelLabel}>取消</Text>
+            </Pressable>
+          </Pressable>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -875,5 +1073,48 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.22,
     shadowRadius: 8,
+  },
+  // Slash-command sheet (long press). Plain views on purpose: the pet overlay
+  // must not depend on a specific screen's bottom-sheet provider.
+  menuBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: "flex-end",
+    backgroundColor: "rgba(0, 0, 0, 0.35)",
+  },
+  menuDismiss: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  menuSheet: {
+    marginHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 16,
+    backgroundColor: "rgba(28, 32, 38, 0.97)",
+  },
+  menuTitle: {
+    color: "rgba(232, 237, 244, 0.6)",
+    fontSize: 13,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  menuItem: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  menuItemPressed: {
+    backgroundColor: "rgba(143, 188, 255, 0.12)",
+  },
+  menuItemLabel: {
+    color: "#e8edf4",
+    fontSize: 15,
+  },
+  menuItemCommand: {
+    color: "#8fbcff",
+    fontSize: 12,
+    marginTop: 2,
+  },
+  menuCancelLabel: {
+    color: "rgba(232, 237, 244, 0.7)",
+    fontSize: 15,
+    textAlign: "center",
   },
 });

@@ -228,6 +228,45 @@ export function resolveToolPose(
 /** Tap reactions. The whole standee is one button, so these rotate per tap. */
 export const PAT_POSES: readonly PoseName[] = ["react-head", "react-belly", "react-tail"];
 
+/**
+ * Standees shown by consecutive pats, in rotation order.
+ *
+ * The 3 tap-reaction standees plus the 14 keyword-reaction standees the user
+ * asked to reuse while patting (all 17 exist in `POSE_ASSETS`, and the keyword
+ * ones are otherwise only reachable from a typed message). Rotation is
+ * deliberate: the old random pick over three standees repeated often enough to
+ * look like "nothing happened".
+ */
+export const PAT_TAP_POSES: readonly PoseName[] = [
+  "react-head",
+  "react-belly",
+  "react-tail",
+  "wink",
+  "eat",
+  "work-celebrate",
+  "cool-shades",
+  "blush",
+  "tail-swing",
+  "greet",
+  "angry",
+  "work-deadline",
+  "abstract",
+  "game-lose",
+  "game-think",
+  "teasing",
+  "bold",
+];
+
+/**
+ * The standee for the pat at `tapIndex` (monotonic per tap): rotate, never
+ * random, so consecutive taps always change the picture and only wrap after all
+ * 17 were shown.
+ */
+export function nextPatPose(tapIndex: number): PoseName {
+  const index = Math.abs(Math.trunc(tapIndex)) % PAT_TAP_POSES.length;
+  return PAT_TAP_POSES[index] ?? "react-head";
+}
+
 /** Tap while a workspace is busy gets the working pat. */
 export const WORKING_PAT_POSE: PoseName = "work-pat";
 
@@ -298,8 +337,8 @@ export const CELEBRATION_POSES: readonly PoseName[] = [
 
 export const ALL_DONE_POSE: PoseName = "achievement";
 
-/** How long a one-shot reaction pose stays up. */
-export const PAT_HOLD_MS = 1400;
+/** How long a one-shot reaction pose stays up. Shorter = taps feel immediate. */
+export const PAT_HOLD_MS = 900;
 export const PICK_UP_HOLD_MS = 600;
 /** How long after a tool call / user message / completed step the pose is valid. */
 export const TOOL_POSE_WINDOW_MS = 60000;

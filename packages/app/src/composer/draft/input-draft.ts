@@ -113,6 +113,12 @@ export function useAgentInputDraft(input: UseAgentInputDraftInput): AgentInputDr
   const attachmentFocusRequestId = useDraftStore(
     (state) => state.attachmentFocusRequestByDraftKey[draftKey] ?? 0,
   );
+  const textInsertRequest = useDraftStore(
+    useShallow((state) => state.textInsertRequestByDraftKey[draftKey] ?? null),
+  );
+  const appliedTextInsertRevision = useDraftStore(
+    (state) => state.appliedTextInsertRevisionByDraftKey[draftKey] ?? 0,
+  );
   const [hydratedDraftKey, setHydratedDraftKey] = useState<string | null>(null);
   const isHydrated = hydratedDraftKey === draftKey;
   const textReplacementRevisionRef = useRef(0);
@@ -180,6 +186,24 @@ export function useAgentInputDraft(input: UseAgentInputDraftInput): AgentInputDr
     },
     [draftKey, publishTextReplacement, textPublication],
   );
+
+  // Text insertions from outside the composer (the desk pet's slash-command
+  // menu) arrive through the draft store and are applied through the same
+  // `textReplacement` path the composer itself uses: the native input is
+  // uncontrolled, so a draft-store text write alone would not be visible.
+  //
+  // The request is consumed on apply and the applied revision lives in the
+  // store: a ref here would reset when the composer remounts and replay the old
+  // command over whatever the user typed in the meantime.
+  useEffect(() => {
+    if (textInsertRequest === null) return;
+    if (textInsertRequest.revision <= appliedTextInsertRevision) return;
+    replaceText(textInsertRequest.text);
+    useDraftStore.getState().consumeTextInsertRequest({
+      draftKey,
+      revision: textInsertRequest.revision,
+    });
+  }, [appliedTextInsertRevision, draftKey, replaceText, textInsertRequest]);
 
   const setAttachments = useCallback(
     (updater: AttachmentUpdater) => {

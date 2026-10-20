@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef } from "react";
 import { Keyboard, Pressable, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { SquarePen, SquareTerminal } from "lucide-react-native";
@@ -17,6 +17,7 @@ import {
   type WorkspaceTabMenuLabels,
 } from "@/screens/workspace/workspace-tab-menu";
 import type { WorkspaceTabDescriptor } from "@/screens/workspace/workspace-tabs-types";
+import { useWorkspaceTabSwitcherStore } from "@/stores/workspace-tab-switcher-store";
 
 // The trigger draws at 32pt beside its island neighbours, so only vertical slop is free.
 const TAB_SWITCHER_TRIGGER_HIT_SLOP = { top: 8, bottom: 8 } as const;
@@ -319,8 +320,18 @@ export const MobileWorkspaceTabSwitcher = memo(function MobileWorkspaceTabSwitch
 
   const tabByKey = useMemo(() => new Map(tabs.map((tab) => [tab.key, tab])), [tabs]);
   const triggerStyle = useIconButtonChromeStyle({ size: "large" });
-  const [isOpen, setIsOpen] = useState(false);
+  // Open state lives in a store: the header trigger still toggles it, and the
+  // desk pet's triple tap can open the panel from outside this component tree.
+  const isOpen = useWorkspaceTabSwitcherStore((state) => state.isOpen);
+  const setOpen = useWorkspaceTabSwitcherStore((state) => state.setOpen);
   const anchorRef = useRef<View>(null);
+
+  // Leaving the workspace must not leave the panel armed for the next mount.
+  useEffect(() => {
+    return () => {
+      useWorkspaceTabSwitcherStore.getState().close();
+    };
+  }, []);
   const tabIndexByKey = useMemo(() => {
     const map = new Map<string, number>();
     tabs.forEach((tab, index) => {
@@ -331,18 +342,18 @@ export const MobileWorkspaceTabSwitcher = memo(function MobileWorkspaceTabSwitch
 
   const handleOpenSwitcher = useCallback(() => {
     Keyboard.dismiss();
-    setIsOpen(true);
-  }, []);
+    setOpen(true);
+  }, [setOpen]);
 
   const handleNewAgent = useCallback(() => {
-    setIsOpen(false);
+    setOpen(false);
     onCreateDraftTab();
-  }, [onCreateDraftTab]);
+  }, [onCreateDraftTab, setOpen]);
 
   const handleNewTerminal = useCallback(() => {
-    setIsOpen(false);
+    setOpen(false);
     onCreateTerminal();
-  }, [onCreateTerminal]);
+  }, [onCreateTerminal, setOpen]);
 
   const footer = useMemo(
     () => (
@@ -457,7 +468,7 @@ export const MobileWorkspaceTabSwitcher = memo(function MobileWorkspaceTabSwitch
         title={t("workspace.tabs.switcher.title")}
         searchPlaceholder={t("workspace.tabs.switcher.searchPlaceholder")}
         open={isOpen}
-        onOpenChange={setIsOpen}
+        onOpenChange={setOpen}
         anchorRef={anchorRef}
         renderOption={renderTabOption}
         footer={footer}
