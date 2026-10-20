@@ -1,31 +1,21 @@
 /**
  * A floating desk pet that sits above every screen in the app shell.
  *
- * Art and motion are upstream, not ours. All 90 standees come from
- * `Sutera-Diffusus/dsh-whale-musume` (MIT — see the LICENSE beside the assets),
- * 512x512 transparent WebP files, one per mood. The motion is a port of that
- * project's CSS keyframes, which drive a *static* standee continuously instead
- * of stepping a sprite sheet. That is the point: the sprite-sheet pet this
- * replaced had ~2 fps of source frames and read as stutter, while these
- * keyframes interpolate.
+ * The behaviour is **not** reimplemented: `src/pets/whale-moe-core.js` is the
+ * upstream state machine from `Sutera-Diffusus/dsh-whale-musume` (MIT), copied
+ * verbatim because it is pure and DOM-free. It owns the dialogue tables (620
+ * lines across 11 banks), the achievement rules, the growth model and the two
+ * mini-games. This file is only the React Native renderer: it feeds that module
+ * the host signals it needs and draws the `pose` and `line` it returns.
  *
- * Ported from `assets/dsh-whale-moe.css`:
- *   wm-breathe  0%/100% translateY(0)   50% translateY(-3px)
- *   wm-sway     0%/100% rotate(0)       25% rotate(1.2deg) translateX(1px)
- *                                       75% rotate(-1.2deg) translateX(-1px)
- *   wm-hop      0% translateY(0) scale(1) rotate(0)
- *               45% translateY(-14px) scale(1.04, 0.96) rotate(-3deg)
- *   wm-pose-in  from opacity .2 translateY(4px) scale(1.04)   to opacity 1
+ * The standees are the upstream 512x512 WebP assets (`assets/pets/whale-musume`,
+ * MIT — see the LICENSE beside them). They are drawn small on purpose; the
+ * upstream page shows them at 200 CSS px, which is too large for a phone.
  *
- * Those are CSS pixels in the standee's own 512px space, so translations are
- * rescaled to PET_SIZE and then lifted, because a literal 3px breathe is under
- * a point on screen. Rotations are kept as authored — degrees do not scale.
- *
- * The pose is chosen by four layers, most specific first:
- *   1. a tap reaction (`react-head`, `wink`, …), held briefly
- *   2. an idle easter egg (`meme-*`, `daily-*`, `game-*`), shown between turns
- *   3. the calendar (`night`, `festival-*`)
- *   4. live agent activity from the session store (`tool`, `waiting`, `failure`)
+ * Motion is a port of the upstream CSS keyframes, but the *soft* set that
+ * actually wins the cascade there: breathe -4px / 3.4s, sway 0 -> 1.2deg / 6s,
+ * hop -8px / 0.6s. The pixel amounts are rescaled out of the standee's 512px
+ * space; degrees are kept as authored.
  *
  * @module paseo/components/pet-overlay
  */
@@ -34,7 +24,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Image } from "expo-image";
 import { usePathname } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { StyleSheet, useWindowDimensions, View } from "react-native";
+import { StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
   Easing,
@@ -49,11 +39,30 @@ import Animated, {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useWorkspaceStatusesForBadges } from "@/stores/session-store-hooks";
 
-/**
- * Every standee shipped by the upstream project, keyed by the part of its file
- * name after `dsh-whale-`. `require` needs static paths, so this table is
- * spelled out rather than generated.
- */
+// The upstream state machine is a UMD module with no DOM dependencies. Vendored
+// verbatim so its dialogue tables and rules stay byte-identical to the source
+// instead of drifting in a hand port. There are no type declarations for it.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const core = require("../pets/whale-moe-core.js") as {
+  computeState: (
+    prev: unknown,
+    signals: Record<string, unknown>,
+    now: number,
+    rng: () => number,
+  ) => PetState;
+  hitZone: (nx: number, ny: number, poseSet: "full" | "peek") => string;
+  POSES: Record<string, string>;
+};
+
+/** The slice of `computeState`'s return value this renderer reads. */
+interface PetState {
+  state: string;
+  pose: string;
+  line: string;
+  speak: boolean;
+  mode?: string;
+}
+
 const POSES = {
   abstract: require("../../assets/pets/whale-musume/dsh-whale-state-abstract.webp"),
   achievement: require("../../assets/pets/whale-musume/dsh-whale-state-achievement.webp"),
@@ -148,7 +157,7 @@ const POSES = {
 
 type PoseName = keyof typeof POSES;
 
-/** On-screen size of the standee; the art itself is 512x512 with padding. */
+/** On-screen size of the standee, in points. Deliberately smaller than upstream. */
 const PET_SIZE = 96;
 /** Source pixels per point, used to rescale the upstream pixel amounts. */
 const ART_TO_SCREEN = PET_SIZE / 512;
@@ -159,140 +168,27 @@ const EDGE_MARGIN = 10;
 /** Screens where a pet would be noise rather than company. */
 const HIDDEN_ROUTES = new Set(["/welcome", "/pair-scan", "/open-project"]);
 
-/** Breathe: upstream -3px at 512, lifted so it is still readable at 96pt. */
-const BREATHE_PX = Math.max(1.6, 3 * ART_TO_SCREEN * 3);
-/** Hop: upstream -14px at 512, rescaled the same way. */
-const HOP_PX = Math.max(7, 14 * ART_TO_SCREEN * 3);
-/** Pose change: upstream translateY(4px) at 512. */
-const POSE_IN_PX = Math.max(3, 4 * ART_TO_SCREEN * 3);
+/** Upstream soft-set keyframes, rescaled out of the 512px standee space. */
+const BREATHE_PX = 4 * ART_TO_SCREEN * 2;
+const HOP_PX = 8 * ART_TO_SCREEN * 2;
+/** Upstream wm-pose-in: translateY(4px) + scale(1.04) -> identity. */
+const POSE_IN_PX = 4 * ART_TO_SCREEN * 2;
 
-/** How long a tap reaction or an easter egg holds before the pose is re-derived. */
-const REACTION_MS = 1600;
-const EASTER_EGG_MS = 6000;
-/** Idle window between easter eggs. */
-const EGG_MIN_MS = 45_000;
-const EGG_MAX_MS = 120_000;
-
-/**
- * Live agent activity -> standee. Only buckets that describe something actually
- * happening appear here, in the store's own priority order. `done` is
- * deliberately absent: it is the bucket's *fallback* (the last `return` of
- * `deriveAgentStateBucket` in `@getpaseo/protocol`), so it means "nothing is
- * happening", not "just finished". Mapping it to a pose would leave the pet
- * celebrating forever whenever a workspace is merely idle.
- */
-const ACTIVITY_POSES: ReadonlyArray<{ status: string; pose: PoseName }> = [
-  { status: "needs_input", pose: "waiting" },
-  { status: "failed", pose: "failure" },
-  { status: "running", pose: "tool" },
-  { status: "attention", pose: "curious" },
-];
-
-/** Tap reactions, picked at random so repeated taps do not repeat the same art. */
-const REACTION_POSES: readonly PoseName[] = [
-  "react-head",
-  "react-belly",
-  "react-tail",
-  "tail-swing",
-  "wink",
-  "blush",
-  "teasing",
-  "pick-up",
-  "greet",
-  "meme-heart",
-  "meme-kyun",
-  "meme-yes",
-];
-
-/**
- * Easter eggs shown while nothing is running: the meme, daily-life and game
- * sets, plus the moods Paseo has no data for. `balance-low` and the
- * `weather-*` standees are deliberately absent — Paseo knows neither balance
- * nor weather, so showing them would be fiction.
- */
-const EASTER_EGG_POSES: readonly PoseName[] = [
-  "meme-broke",
-  "meme-cry",
-  "meme-doge",
-  "meme-doubt",
-  "meme-music",
-  "meme-no",
-  "meme-ojisan",
-  "meme-omg",
-  "meme-peace",
-  "meme-shock",
-  "meme-sike",
-  "meme-smile-pain",
-  "meme-smug",
-  "meme-wakuwaku",
-  "meme-worship",
-  "daily-coffee",
-  "daily-cooking",
-  "daily-done",
-  "daily-eat",
-  "daily-fishing",
-  "daily-gaming",
-  "daily-melt",
-  "daily-painting",
-  "daily-pajama",
-  "daily-picnic",
-  "daily-shower",
-  "daily-stretch",
-  "eat",
-  "game-cheat",
-  "game-happy",
-  "game-lose",
-  "game-think",
-  "game-win",
-  "levelup",
-  "star",
-  "achievement",
-  "success",
-  "sweep",
-  "cool-shades",
-  "bold",
-  "angry",
-  "sleep",
-  "afk",
-  "abstract",
-  "valentine",
-  "running",
-  "thinking",
-  "work-idea",
-  "work-review",
-  "work-debug",
-  "work-deploy",
-  "work-meeting",
-  "work-slack",
-  "work-slack-phone",
-  "work-boss",
-  "work-ram",
-  "work-pat",
-  "work-sleep",
-  "work-deadline",
-  "work-celebrate",
-  "festival-mid-autumn",
-  "festival-spring",
-];
-
-/**
- * Calendar poses. Only fixed-date holidays are automated: mid-autumn and
- * spring festival follow the lunar calendar, which needs a table we do not
- * have, so those two standees are reachable through the easter-egg pool.
- */
-function calendarPose(now: Date): PoseName | null {
-  const month = now.getMonth() + 1;
-  const day = now.getDate();
-  const hour = now.getHours();
-  if (month === 12 && day >= 20 && day <= 26) return "festival-christmas";
-  if (month === 10 && day >= 25 && day <= 31) return "festival-halloween";
-  if (hour >= 23 || hour < 6) return "night";
-  return null;
-}
+/** State machine tick. The module itself rate-limits speech (`SPEECH_GAP_MS`). */
+const TICK_MS = 500;
+/** How long a finished line stays on screen before the bubble fades. */
+const BUBBLE_HOLD_MS = 4500;
 
 interface StoredPosition {
   x: number;
   y: number;
+}
+
+/** Per-character delay for the typewriter, mirroring the upstream pacing. */
+function charDelay(character: string): number {
+  if ("，。！？、；：,.!?;:".includes(character)) return 260;
+  if (character === " ") return 90;
+  return 64;
 }
 
 function pickRandom<T>(items: readonly T[]): T {
@@ -304,46 +200,78 @@ export function PetOverlay() {
   const insets = useSafeAreaInsets();
   const pathname = usePathname();
 
-  // Live agent activity across every workspace this client knows about.
+  // Host signals: Paseo's own workspace buckets, mapped onto the names the
+  // upstream state machine expects. `thinking` has no direct bucket, so it
+  // stays false rather than being guessed at.
   const workspaceStatuses = useWorkspaceStatusesForBadges();
-
-  const [reaction, setReaction] = useState<PoseName | null>(null);
-  const [celebration, setCelebration] = useState<PoseName | null>(null);
-  const [egg, setEgg] = useState<PoseName | null>(null);
-  const [clockPose, setClockPose] = useState<PoseName | null>(() => calendarPose(new Date()));
-
-  /**
-   * The winning activity bucket, in the store's own priority order, or null
-   * when no workspace reports one. Kept as the raw bucket name so the
-   * running -> done edge can be observed below.
-   */
-  const activityBucket = useMemo<string | null>(() => {
+  const signals = useMemo<Record<string, unknown>>(() => {
     const seen = new Set(workspaceStatuses);
-    for (const entry of ACTIVITY_POSES) {
-      if (seen.has(entry.status)) return entry.status;
-    }
-    return null;
+    return {
+      tool: seen.has("running"),
+      waiting: seen.has("needs_input"),
+      error: seen.has("failed"),
+      curiousAt: seen.has("attention") ? Date.now() : undefined,
+      denseCode: false,
+      petDisabled: false,
+    };
   }, [workspaceStatuses]);
+  const signalsRef = useRef(signals);
+  signalsRef.current = signals;
 
-  /** Anything that is not an active bucket rests at the idle standee. */
-  const activityPose = useMemo<PoseName>(() => {
-    const entry = ACTIVITY_POSES.find((candidate) => candidate.status === activityBucket);
-    return entry?.pose ?? "idle-cute";
-  }, [activityBucket]);
+  // The state machine carries its own memory (lastSpeechAt, streak, lineCount),
+  // so the previous return value must be fed back in on every tick.
+  // Holds the *complete* previous return value. `computeState` keeps its own
+  // memory (lastSpeechAt, streak, lineCount) inside that object, so storing only
+  // the fields this renderer draws would silently break its speech rate limit.
+  const stateRef = useRef<unknown>(undefined);
+  if (stateRef.current === undefined) {
+    stateRef.current = core.computeState(undefined, {}, Date.now(), Math.random);
+  }
 
-  const pose: PoseName = reaction ?? celebration ?? egg ?? clockPose ?? activityPose;
+  const [petState, setPetState] = useState<PetState>(stateRef.current as PetState);
 
-  // Celebrate on the running -> done edge only. `done` is the resting bucket, so
-  // a level-triggered mapping would celebrate forever; this is edge-triggered.
-  const previousBucket = useRef<string | null>(null);
   useEffect(() => {
-    const wasRunning = previousBucket.current === "running";
-    previousBucket.current = activityBucket;
-    if (!wasRunning || activityBucket !== "done") return;
-    setCelebration("celebrate");
-    const timer = setTimeout(() => setCelebration(null), 2500);
-    return () => clearTimeout(timer);
-  }, [activityBucket]);
+    const timer = setInterval(() => {
+      const next = core.computeState(stateRef.current, signalsRef.current, Date.now(), Math.random);
+      stateRef.current = next;
+      // Repaint only when something the renderer draws actually changed; the
+      // module ticks every 500ms and would otherwise re-render constantly.
+      setPetState((current) =>
+        current.pose === next.pose && current.line === next.line && current.speak === next.speak
+          ? current
+          : next,
+      );
+    }, TICK_MS);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Typewriter: reveal the current line character by character, then hold it.
+  const [typed, setTyped] = useState("");
+  const [bubbleVisible, setBubbleVisible] = useState(false);
+  useEffect(() => {
+    const line = petState.line;
+    if (!petState.speak || !line) {
+      setBubbleVisible(false);
+      return;
+    }
+    setBubbleVisible(true);
+    setTyped("");
+    let index = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const step = () => {
+      index += 1;
+      setTyped(line.slice(0, index));
+      if (index < line.length) {
+        timer = setTimeout(step, charDelay(line[index - 1]));
+      } else {
+        timer = setTimeout(() => setBubbleVisible(false), BUBBLE_HOLD_MS);
+      }
+    };
+    timer = setTimeout(step, 0);
+    return () => {
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [petState.line, petState.speak]);
 
   // Motion drivers. `breathe` and `sway` loop forever; `hop` and `poseIn` are
   // one-shots retriggered by a tap or a pose change.
@@ -363,65 +291,29 @@ export function PetOverlay() {
   const minY = insets.top + EDGE_MARGIN;
   const maxY = Math.max(minY, height - PET_SIZE - EDGE_MARGIN);
 
-  // Idle motion: wm-breathe (0 -> -3px -> 0) and wm-sway (0 -> +1.2deg -> -1.2deg).
-  // `withRepeat(..., -1, true)` reverses each cycle, matching the CSS 0/50/100 pairs.
+  // Upstream soft set: wm-breathe (-4px over 3.4s) and wm-sway (0 -> 1.2deg / 6s).
   useEffect(() => {
     breathe.value = withRepeat(
-      withTiming(1, { duration: 1600, easing: Easing.inOut(Easing.quad) }),
+      withTiming(1, { duration: 1700, easing: Easing.inOut(Easing.quad) }),
       -1,
       true,
     );
     sway.value = withRepeat(
-      withTiming(1, { duration: 2000, easing: Easing.inOut(Easing.sin) }),
+      withTiming(1, { duration: 6000, easing: Easing.inOut(Easing.sin) }),
       -1,
       true,
     );
   }, [breathe, sway]);
 
-  // Play wm-pose-in whenever the standee actually changes.
-  const lastPose = useRef<PoseName>(pose);
+  // Upstream swap: 140ms press-down, change, 480ms rebound. Approximated with a
+  // single pose-in so the swap does not queue two animations per change.
+  const lastPose = useRef<string>(petState.pose);
   useEffect(() => {
-    if (lastPose.current === pose) return;
-    lastPose.current = pose;
+    if (lastPose.current === petState.pose) return;
+    lastPose.current = petState.pose;
     poseIn.value = 0;
     poseIn.value = withTiming(1, { duration: 260, easing: Easing.out(Easing.quad) });
-  }, [pose, poseIn]);
-
-  // Recompute the calendar pose on the minute so the pet crosses midnight and
-  // holiday boundaries without a relaunch.
-  useEffect(() => {
-    const timer = setInterval(() => setClockPose(calendarPose(new Date())), 60_000);
-    return () => clearInterval(timer);
-  }, []);
-
-  // Easter eggs only while no agent is working, so she never changes pose
-  // mid-turn. The timeout is re-rolled each cycle to avoid a metronome feel.
-  useEffect(() => {
-    if (activityPose !== "idle-cute") return;
-    let eggTimer: ReturnType<typeof setTimeout> | undefined;
-    let clearTimer: ReturnType<typeof setTimeout> | undefined;
-    let cancelled = false;
-
-    const schedule = () => {
-      if (cancelled) return;
-      const delay = EGG_MIN_MS + Math.random() * (EGG_MAX_MS - EGG_MIN_MS);
-      eggTimer = setTimeout(() => {
-        if (cancelled) return;
-        setEgg(pickRandom(EASTER_EGG_POSES));
-        clearTimer = setTimeout(() => {
-          setEgg(null);
-          schedule();
-        }, EASTER_EGG_MS);
-      }, delay);
-    };
-
-    schedule();
-    return () => {
-      cancelled = true;
-      if (eggTimer !== undefined) clearTimeout(eggTimer);
-      if (clearTimer !== undefined) clearTimeout(clearTimer);
-    };
-  }, [activityPose]);
+  }, [petState.pose, poseIn]);
 
   // Restore the stored position once on mount.
   const restored = useRef(false);
@@ -473,16 +365,17 @@ export function PetOverlay() {
     hop.value = 0;
     hop.value = withSequence(
       withTiming(1, { duration: 220, easing: Easing.out(Easing.quad) }),
-      withTiming(0, { duration: 320, easing: Easing.in(Easing.quad) }),
+      withTiming(0, { duration: 380, easing: Easing.in(Easing.quad) }),
     );
   }, [hop]);
 
-  /** A tap: a random reaction plus a hop, then back to the derived pose. */
+  /**
+   * A tap. The upstream build splits this into head / belly / tail hit zones
+   * (`hitZone`), but this renderer has no pointer coordinates inside a gesture
+   * callback without extra plumbing, so it plays the generic reaction.
+   */
   const react = useCallback(() => {
-    setEgg(null);
-    setReaction(pickRandom(REACTION_POSES));
     playHop();
-    setTimeout(() => setReaction(null), REACTION_MS);
   }, [playHop]);
 
   const pan = useMemo(
@@ -529,11 +422,15 @@ export function PetOverlay() {
     ],
   }));
 
+  // The upstream standee name is already the suffix of its file name, so an
+  // unknown pose (a newer upstream mood) falls back to the idle standee.
+  const standee = POSES[petState.pose as PoseName] ?? POSES["idle-cute"];
+
   if (HIDDEN_ROUTES.has(pathname)) return null;
 
   return (
     // `box-none` keeps the rest of the screen interactive: only the pet cell
-    // itself receives touches.
+    // and its bubble receive touches.
     <View pointerEvents="box-none" style={styles.host}>
       <GestureDetector gesture={gesture}>
         <Animated.View
@@ -541,7 +438,12 @@ export function PetOverlay() {
           accessibilityLabel="Desk pet"
           style={[styles.pet, petStyle]}
         >
-          <Image source={POSES[pose]} contentFit="contain" style={styles.standee} />
+          <Image source={standee} contentFit="contain" style={styles.standee} />
+          {bubbleVisible && typed ? (
+            <View style={styles.bubble} pointerEvents="none">
+              <Text style={styles.bubbleText}>{typed}</Text>
+            </View>
+          ) : null}
         </Animated.View>
       </GestureDetector>
     </View>
@@ -562,5 +464,21 @@ const styles = StyleSheet.create({
   standee: {
     width: PET_SIZE,
     height: PET_SIZE,
+  },
+  bubble: {
+    position: "absolute",
+    bottom: PET_SIZE + 10,
+    left: -40,
+    minWidth: PET_SIZE,
+    maxWidth: 250,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 12,
+    backgroundColor: "rgba(28, 32, 38, 0.94)",
+  },
+  bubbleText: {
+    color: "#e8edf4",
+    fontSize: 13,
+    lineHeight: 18,
   },
 });
