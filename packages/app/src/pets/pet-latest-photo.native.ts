@@ -14,6 +14,7 @@
  */
 
 import * as MediaLibrary from "expo-media-library";
+import { normalizePickedImageAssets } from "@/hooks/image-attachment-picker";
 import { persistAttachmentFromFileUri } from "@/attachments/service";
 import type { AttachmentMetadata } from "@/attachments/types";
 import { useDraftStore } from "@/stores/draft-store";
@@ -86,10 +87,21 @@ export async function insertLatestPhotoIntoDraft(
     // iOS exposes the library asset via ph:// in `uri`; `localUri` is the
     // readable file copy when the platform provides one (Android always does).
     const info = await MediaLibrary.getAssetInfoAsync(asset);
+    // The most recent photo is usually HEIC on iOS, which the upload path
+    // rejects ("image/heic is not accepted by this deployment"). Reuse the
+    // picker's normalizer so this path converts exactly like a picked image.
+    const [normalized] = await normalizePickedImageAssets([
+      {
+        uri: info?.localUri ?? asset.uri,
+        mimeType: mimeTypeForFilename(asset.filename),
+        fileName: asset.filename,
+      },
+    ]);
+    if (normalized === undefined || normalized.source.kind !== "file_uri") return "failed";
     const metadata = await persistAttachmentFromFileUri({
-      uri: info?.localUri ?? asset.uri,
-      mimeType: mimeTypeForFilename(asset.filename),
-      fileName: asset.filename,
+      uri: normalized.source.uri,
+      mimeType: normalized.mimeType,
+      fileName: normalized.fileName ?? asset.filename,
     });
     await appendImageToDraft(draftKey, metadata);
     return "inserted";

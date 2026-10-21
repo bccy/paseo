@@ -39,6 +39,18 @@
 import { useQuery } from "@tanstack/react-query";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Image } from "expo-image";
+import {
+  Archive,
+  Cpu,
+  Fish,
+  Minimize2,
+  SlidersHorizontal,
+  SquarePen,
+  SquareTerminal,
+  Target,
+  Undo2,
+  type LucideIcon,
+} from "lucide-react-native";
 import { usePathname } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -143,6 +155,29 @@ const EDGE_MARGIN = 10;
 const COMPOSER_GUARD = 64;
 /** Screens where a pet would be noise rather than company. */
 const HIDDEN_ROUTES = new Set(["/welcome", "/pair-scan", "/open-project"]);
+
+/** Paseo's own mark, so its commands are visually distinct from DSH's. */
+const PASEO_MARK = require("../../assets/images/favicon-light.png");
+
+/**
+ * Icon per slash command. Known command names get a matching glyph; anything
+ * else falls back to the generic prompt icon instead of vanishing.
+ */
+const COMMAND_ICONS: Readonly<Record<string, LucideIcon>> = {
+  exit: Archive,
+  quit: Archive,
+  q: Archive,
+  "replace-agent-with-draft": SquarePen,
+  goal: Target,
+  rewind: Undo2,
+  model: Cpu,
+  mode: SlidersHorizontal,
+  compact: Minimize2,
+};
+
+function iconForCommand(name: string): LucideIcon {
+  return COMMAND_ICONS[name] ?? SquareTerminal;
+}
 
 /** Upstream soft-set keyframes, rescaled out of the 512px standee space. */
 const BREATHE_PX = 4 * ART_TO_SCREEN * 2;
@@ -1093,22 +1128,32 @@ export function PetOverlay() {
               contentContainerStyle={styles.menuScrollContent}
               showsVerticalScrollIndicator
             >
-              {slashCommands.map((command) => (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={`${command.label}：填入 ${command.insert}`}
-                  key={command.name}
-                  onPress={() => selectSlashCommand(command)}
-                  style={({ pressed }) => [
-                    styles.menuItem,
-                    pressed ? { backgroundColor: theme.colors.border } : null,
-                  ]}
-                >
-                  <Text style={[styles.menuItemLabel, { color: theme.colors.foreground }]}>
-                    {command.label}
-                  </Text>
-                </Pressable>
-              ))}
+              {slashCommands.map((command) => {
+                const Icon = iconForCommand(command.name);
+                return (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`${command.label}：填入 ${command.insert}`}
+                    key={command.name}
+                    onPress={() => selectSlashCommand(command)}
+                    style={({ pressed }) => [
+                      styles.menuItem,
+                      pressed ? { backgroundColor: theme.colors.border } : null,
+                    ]}
+                  >
+                    <View style={styles.menuItemRow}>
+                      {command.source === "paseo" ? (
+                        <Image source={PASEO_MARK} style={styles.menuItemMark} contentFit="contain" />
+                      ) : (
+                        <Fish size={16} color={theme.colors.foregroundMuted} />
+                      )}
+                      <Text style={[styles.menuItemLabel, { color: theme.colors.foreground }]}>
+                        {command.label}
+                      </Text>
+                    </View>
+                  </Pressable>
+                );
+              })}
             </ScrollView>
             <Pressable
               accessibilityRole="button"
@@ -1178,6 +1223,15 @@ const styles = StyleSheet.create({
   menuItem: {
     paddingHorizontal: 16,
     paddingVertical: 12,
+  },
+  menuItemRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  menuItemMark: {
+    width: 16,
+    height: 16,
   },
   menuItemLabel: {
     fontSize: 15,
