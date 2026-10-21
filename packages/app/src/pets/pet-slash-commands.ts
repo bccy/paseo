@@ -19,6 +19,12 @@ export interface PetSlashCommand {
   readonly label: string;
 }
 
+/** A command as the daemon reports it (`listCommands`). */
+export interface RemoteSlashCommand {
+  readonly name: string;
+  readonly description: string;
+}
+
 /** Chinese labels for the local client-side slash commands. */
 const CLIENT_COMMAND_LABELS: Readonly<Record<string, string>> = {
   "archive-agent": "归档当前会话",
@@ -26,18 +32,30 @@ const CLIENT_COMMAND_LABELS: Readonly<Record<string, string>> = {
 };
 
 /**
- * The commands the long-press menu offers.
+ * The commands the long-press menu offers: the local client commands plus every
+ * command the daemon reports for the focused agent (model, mode, compact, …).
  *
- * Source: the local client command table (`CLIENT_SLASH_COMMANDS`). Server-side
- * slash commands are not listed here: they need a daemon round-trip
- * (`useAgentCommandsQuery` needs a host-runtime client + agent identity), and the
- * pet overlay is outside the composer tree. The menu is therefore limited to the
- * commands that work without a round-trip.
+ * Remote entries are keyed by name and win over local ones, except that a local
+ * command keeps its Chinese label when we have one — the daemon only describes
+ * itself in its own words.
  */
-export function buildPetSlashCommands(): PetSlashCommand[] {
-  return CLIENT_SLASH_COMMANDS.map((command) => ({
-    name: command.name,
-    insert: `/${command.name}`,
-    label: CLIENT_COMMAND_LABELS[command.kind] ?? command.description,
-  }));
+export function buildPetSlashCommands(
+  remote: readonly RemoteSlashCommand[] = [],
+): PetSlashCommand[] {
+  const byName = new Map<string, PetSlashCommand>();
+  for (const command of remote) {
+    byName.set(command.name, {
+      name: command.name,
+      insert: `/${command.name}`,
+      label: command.description || `/${command.name}`,
+    });
+  }
+  for (const command of CLIENT_SLASH_COMMANDS) {
+    byName.set(command.name, {
+      name: command.name,
+      insert: `/${command.name}`,
+      label: CLIENT_COMMAND_LABELS[command.kind] ?? command.description,
+    });
+  }
+  return [...byName.values()];
 }

@@ -36,6 +36,7 @@
  * @module paseo/components/pet-overlay
  */
 
+import { useQuery } from "@tanstack/react-query";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Image } from "expo-image";
 import { usePathname } from "expo-router";
@@ -53,8 +54,10 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useUnistyles } from "react-native-unistyles";
 import { useShallow } from "zustand/shallow";
 import { resolveFocusedChatTarget } from "@/composer/focused-chat-target";
+import { useHostRuntimeClient } from "@/runtime/host-runtime";
 import { useDraftStore } from "@/stores/draft-store";
 import {
   useActiveWorkspaceSelection,
@@ -83,7 +86,11 @@ import {
   type PoseName,
 } from "../pets/pose-map";
 import { insertLatestPhotoIntoDraft } from "../pets/pet-latest-photo";
-import { buildPetSlashCommands, type PetSlashCommand } from "../pets/pet-slash-commands";
+import {
+  buildPetSlashCommands,
+  type PetSlashCommand,
+  type RemoteSlashCommand,
+} from "../pets/pet-slash-commands";
 import { resolveTapBurstAction, TAP_BURST_WINDOW_MS } from "../pets/pet-taps";
 
 // The upstream state machine is a UMD module with no DOM dependencies. Vendored
@@ -436,6 +443,10 @@ function selectMostRecentTodoList(state: PetStoreSource): TodoListSnapshot | nul
 
 export function PetOverlay() {
   const { width, height } = useWindowDimensions();
+  // The command sheet is the one piece of UI the pet draws, so it uses the app
+  // theme instead of hard-coded colours: it has to look like the rest of Paseo,
+  // including in light mode.
+  const { theme } = useUnistyles();
   const { top: topInset, bottom: bottomInset } = useSafeAreaInsets();
   const pathname = usePathname();
 
@@ -495,8 +506,28 @@ export function PetOverlay() {
   const focusedDraftKeyRef = useRef<string | null>(null);
   focusedDraftKeyRef.current = focusedChat?.draftKey ?? null;
 
+  // Server-side slash commands (model, mode, compact, …). The composer queries
+  // these through a hook that only runs inside a retained panel; the pet sits at
+  // the app root, so it asks the daemon client for the focused agent directly.
+  const petServerId = chatSelection?.serverId ?? "";
+  const petAgentId = focusedChat?.agentId ?? null;
+  const petHostClient = useHostRuntimeClient(petServerId);
+  const { data: remoteSlashCommands } = useQuery({
+    queryKey: ["pet-slash-commands", petServerId, petAgentId],
+    queryFn: async (): Promise<RemoteSlashCommand[]> => {
+      if (petHostClient === null || petAgentId === null) return [];
+      const response = await petHostClient.listCommands({ agentId: petAgentId });
+      return response.commands as RemoteSlashCommand[];
+    },
+    enabled: petHostClient !== null && petAgentId !== null,
+    staleTime: 60_000,
+  });
+
   const [commandMenuVisible, setCommandMenuVisible] = useState(false);
-  const slashCommands = useMemo<PetSlashCommand[]>(() => buildPetSlashCommands(), []);
+  const slashCommands = useMemo<PetSlashCommand[]>(
+    () => buildPetSlashCommands(remoteSlashCommands ?? []),
+    [remoteSlashCommands],
+  );
 
   // ---- pose trigger state --------------------------------------------------
   // These are refs, not state: the 500ms tick resolves the pose and is the only
@@ -718,18 +749,21 @@ export function PetOverlay() {
 
   // The composer owns the bottom of the screen and rises with the keyboard.
   // Track the keyboard so the pet can be clamped above the input bar instead of
-  // ending up hidden behind it.
+  // ending up hidden behind it, and remember where she was so closing the
+  // keyboard puts her back instead of leaving her parked in the lifted spot.
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const preKeyboardYRef = useRef<number | null>(null);
   useEffect(() => {
-    const show = Keyboard.addListener("keyboardWillShow", (event) =>
-      setKeyboardHeight(event.endCoordinates.height),
-    );
+    const show = Keyboard.addListener("keyboardWillShow", (event) => {
+      if (preKeyboardYRef.current === null) preKeyboardYRef.current = y.value;
+      setKeyboardHeight(event.endCoordinates.height);
+    });
     const hide = Keyboard.addListener("keyboardWillHide", () => setKeyboardHeight(0));
     return () => {
       show.remove();
       hide.remove();
     };
-  }, []);
+  }, [y]);
 
   const minX = EDGE_MARGIN;
   const maxX = Math.max(EDGE_MARGIN, width - PET_SIZE - EDGE_MARGIN);
@@ -797,9 +831,20 @@ export function PetOverlay() {
       return;
     }
     x.value = Math.min(Math.max(minX, x.value), maxX);
-    y.value = Math.min(Math.max(minY, y.value), maxY);
+    // The keyboard shift is temporary: restoring the remembered position on
+    // close keeps the pet where the user left her instead of stranding her in
+    // the lifted spot. Dragging while the keyboard is open overwrites the
+    // memory on the next open, so this cannot fight a deliberate move.
+    if (keyboardHeight > 0) {
+      y.value = Math.min(Math.max(minY, y.value), maxY);
+    } else if (preKeyboardYRef.current !== null) {
+      y.value = Math.min(Math.max(minY, preKeyboardYRef.current), maxY);
+      preKeyboardYRef.current = null;
+    } else {
+      y.value = Math.min(Math.max(minY, y.value), maxY);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [minX, maxX, minY, maxY, height]);
+  }, [minX, maxX, minY, maxY, height, keyboardHeight]);
 
   const persist = useCallback((nextX: number, nextY: number) => {
     void AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ x: nextX, y: nextY })).catch(() => {
@@ -1023,18 +1068,33 @@ export function PetOverlay() {
             onPress={closeCommandMenu}
             style={styles.menuDismiss}
           />
-          <Pressable style={styles.menuSheet} onPress={() => undefined}>
-            <Text style={styles.menuTitle}>桌宠命令（选中后填入输入框）</Text>
+          <Pressable
+            style={[
+              styles.menuSheet,
+              { backgroundColor: theme.colors.background, borderColor: theme.colors.border },
+            ]}
+            onPress={() => undefined}
+          >
+            <Text style={[styles.menuTitle, { color: theme.colors.foregroundMuted }]}>
+              桌宠命令（选中后填入输入框）
+            </Text>
             {slashCommands.map((command) => (
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={`${command.label}：填入 ${command.insert}`}
                 key={command.name}
                 onPress={() => selectSlashCommand(command)}
-                style={({ pressed }) => [styles.menuItem, pressed ? styles.menuItemPressed : null]}
+                style={({ pressed }) => [
+                  styles.menuItem,
+                  pressed ? { backgroundColor: theme.colors.border } : null,
+                ]}
               >
-                <Text style={styles.menuItemLabel}>{command.label}</Text>
-                <Text style={styles.menuItemCommand}>{command.insert}</Text>
+                <Text style={[styles.menuItemLabel, { color: theme.colors.foreground }]}>
+                  {command.label}
+                </Text>
+                <Text style={[styles.menuItemCommand, { color: theme.colors.accent }]}>
+                  {command.insert}
+                </Text>
               </Pressable>
             ))}
             <Pressable
@@ -1043,7 +1103,9 @@ export function PetOverlay() {
               onPress={closeCommandMenu}
               style={styles.menuItem}
             >
-              <Text style={styles.menuCancelLabel}>取消</Text>
+              <Text style={[styles.menuCancelLabel, { color: theme.colors.foregroundMuted }]}>
+                取消
+              </Text>
             </Pressable>
           </Pressable>
         </View>
@@ -1075,7 +1137,9 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
   },
   // Slash-command sheet (long press). Plain views on purpose: the pet overlay
-  // must not depend on a specific screen's bottom-sheet provider.
+  // must not depend on a specific screen's bottom-sheet provider. Colours come
+  // from the app theme at the call site so the sheet matches the rest of Paseo,
+  // including light mode.
   menuBackdrop: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: "flex-end",
@@ -1088,10 +1152,9 @@ const styles = StyleSheet.create({
     marginHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 16,
-    backgroundColor: "rgba(28, 32, 38, 0.97)",
+    borderWidth: 1,
   },
   menuTitle: {
-    color: "rgba(232, 237, 244, 0.6)",
     fontSize: 13,
     paddingHorizontal: 16,
     paddingVertical: 8,
@@ -1100,20 +1163,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
   },
-  menuItemPressed: {
-    backgroundColor: "rgba(143, 188, 255, 0.12)",
-  },
   menuItemLabel: {
-    color: "#e8edf4",
     fontSize: 15,
   },
   menuItemCommand: {
-    color: "#8fbcff",
     fontSize: 12,
     marginTop: 2,
   },
   menuCancelLabel: {
-    color: "rgba(232, 237, 244, 0.7)",
     fontSize: 15,
     textAlign: "center",
   },
