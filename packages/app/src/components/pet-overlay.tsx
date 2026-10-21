@@ -1135,30 +1135,36 @@ export function PetOverlay() {
             >
               {slashCommands.map((command) => {
                 const Icon = iconForCommand(command.name);
+                // The row scrolls, so the ScrollView has to own the gesture: a
+                // Pressable wrapping it would swallow the horizontal drag before
+                // the scroll view ever sees it. The Pressable therefore sits
+                // inside, sized to the content it is meant to activate.
                 return (
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={`${command.label}：填入 ${command.insert}`}
+                  <ScrollView
+                    horizontal
                     key={command.name}
-                    onPress={() => selectSlashCommand(command)}
-                    style={({ pressed }) => [
-                      styles.menuItem,
-                      pressed ? { backgroundColor: theme.colors.border } : null,
-                    ]}
+                    showsHorizontalScrollIndicator={false}
+                    style={styles.menuItemScroll}
                   >
-                    <View style={styles.menuItemRow}>
-                      {command.source === "paseo" ? (
-                        <Image source={PASEO_MARK} style={styles.menuItemMark} contentFit="contain" />
-                      ) : (
-                        <DshIcon size={16} />
-                      )}
-                      {/* The daemon describes some commands at length; keep one line and
-                          let it scroll sideways instead of truncating with an ellipsis. */}
-                      <ScrollView
-                        horizontal
-                        showsHorizontalScrollIndicator={false}
-                        style={styles.menuItemLabelScroll}
-                      >
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`${command.label}：填入 ${command.insert}`}
+                      onPress={() => selectSlashCommand(command)}
+                      style={({ pressed }) => [
+                        styles.menuItem,
+                        pressed ? { backgroundColor: theme.colors.border } : null,
+                      ]}
+                    >
+                      <View style={styles.menuItemRow}>
+                        {command.source === "paseo" ? (
+                          <Image
+                            source={PASEO_MARK}
+                            style={styles.menuItemMark}
+                            contentFit="contain"
+                          />
+                        ) : (
+                          <DshIcon size={16} />
+                        )}
                         <Text
                           style={[
                             styles.menuItemLabel,
@@ -1167,9 +1173,9 @@ export function PetOverlay() {
                         >
                           {command.label}
                         </Text>
-                      </ScrollView>
-                    </View>
-                  </Pressable>
+                      </View>
+                    </Pressable>
+                  </ScrollView>
                 );
               })}
             </ScrollView>
@@ -1256,8 +1262,8 @@ const styles = StyleSheet.create({
     height: 16,
     marginTop: 2,
   },
-  menuItemLabelScroll: {
-    flex: 1,
+  menuItemScroll: {
+    flexGrow: 0,
   },
   menuItemLabel: {
     flexShrink: 0,
