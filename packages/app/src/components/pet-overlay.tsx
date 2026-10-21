@@ -41,7 +41,15 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Image } from "expo-image";
 import { usePathname } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Keyboard, Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
+import {
+  Keyboard,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  useWindowDimensions,
+  View,
+} from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
   Easing,
@@ -1078,25 +1086,30 @@ export function PetOverlay() {
             <Text style={[styles.menuTitle, { color: theme.colors.foregroundMuted }]}>
               桌宠命令（选中后填入输入框）
             </Text>
-            {slashCommands.map((command) => (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={`${command.label}：填入 ${command.insert}`}
-                key={command.name}
-                onPress={() => selectSlashCommand(command)}
-                style={({ pressed }) => [
-                  styles.menuItem,
-                  pressed ? { backgroundColor: theme.colors.border } : null,
-                ]}
-              >
-                <Text style={[styles.menuItemLabel, { color: theme.colors.foreground }]}>
-                  {command.label}
-                </Text>
-                <Text style={[styles.menuItemCommand, { color: theme.colors.accent }]}>
-                  {command.insert}
-                </Text>
-              </Pressable>
-            ))}
+            {/* The daemon can report a long command list, so the sheet scrolls
+                inside a capped height instead of growing past the screen top. */}
+            <ScrollView
+              style={{ maxHeight: Math.min(height * 0.55, 420) }}
+              contentContainerStyle={styles.menuScrollContent}
+              showsVerticalScrollIndicator
+            >
+              {slashCommands.map((command) => (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`${command.label}：填入 ${command.insert}`}
+                  key={command.name}
+                  onPress={() => selectSlashCommand(command)}
+                  style={({ pressed }) => [
+                    styles.menuItem,
+                    pressed ? { backgroundColor: theme.colors.border } : null,
+                  ]}
+                >
+                  <Text style={[styles.menuItemLabel, { color: theme.colors.foreground }]}>
+                    {command.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="关闭命令菜单"
@@ -1159,16 +1172,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 8,
   },
+  menuScrollContent: {
+    paddingBottom: 4,
+  },
   menuItem: {
     paddingHorizontal: 16,
     paddingVertical: 12,
   },
   menuItemLabel: {
     fontSize: 15,
-  },
-  menuItemCommand: {
-    fontSize: 12,
-    marginTop: 2,
   },
   menuCancelLabel: {
     fontSize: 15,
