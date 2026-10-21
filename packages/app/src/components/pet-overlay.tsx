@@ -1118,7 +1118,12 @@ export function PetOverlay() {
             ]}
             onPress={() => undefined}
           >
-            <Text style={[styles.menuTitle, { color: theme.colors.foregroundMuted }]}>
+            <Text
+              style={[
+                styles.menuTitle,
+                { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
+              ]}
+            >
               桌宠命令（选中后填入输入框）
             </Text>
             {/* The daemon can report a long command list, so the sheet scrolls
@@ -1147,9 +1152,22 @@ export function PetOverlay() {
                       ) : (
                         <DshIcon size={16} />
                       )}
-                      <Text style={[styles.menuItemLabel, { color: theme.colors.foreground }]}>
-                        {command.label}
-                      </Text>
+                      {/* The daemon describes some commands at length; keep one line and
+                          let it scroll sideways instead of truncating with an ellipsis. */}
+                      <ScrollView
+                        horizontal
+                        showsHorizontalScrollIndicator={false}
+                        style={styles.menuItemLabelScroll}
+                      >
+                        <Text
+                          style={[
+                            styles.menuItemLabel,
+                            { color: theme.colors.foreground, fontSize: theme.fontSize.content },
+                          ]}
+                        >
+                          {command.label}
+                        </Text>
+                      </ScrollView>
                     </View>
                   </Pressable>
                 );
@@ -1161,7 +1179,12 @@ export function PetOverlay() {
               onPress={closeCommandMenu}
               style={styles.menuItem}
             >
-              <Text style={[styles.menuCancelLabel, { color: theme.colors.foregroundMuted }]}>
+              <Text
+                style={[
+                  styles.menuCancelLabel,
+                  { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.content },
+                ]}
+              >
                 取消
               </Text>
             </Pressable>
@@ -1213,7 +1236,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   menuTitle: {
-    fontSize: 13,
     paddingHorizontal: 16,
     paddingVertical: 8,
   },
@@ -1226,18 +1248,21 @@ const styles = StyleSheet.create({
   },
   menuItemRow: {
     flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
+    alignItems: "flex-start",
+    gap: 8,
   },
   menuItemMark: {
     width: 16,
     height: 16,
+    marginTop: 2,
+  },
+  menuItemLabelScroll: {
+    flex: 1,
   },
   menuItemLabel: {
-    fontSize: 15,
+    flexShrink: 0,
   },
   menuCancelLabel: {
-    fontSize: 15,
     textAlign: "center",
   },
 });

@@ -64,16 +64,12 @@ const REMOTE_COMMAND_LABELS: Readonly<Record<string, string>> = {
   review: "代码审查",
   test: "运行测试",
   commit: "提交改动",
+  export: "导出会话日志",
 };
 
-/** Longest label shown in the sheet before it is shortened. */
-const MAX_LABEL_LENGTH = 22;
-
-/** Keep one-line entries readable: the daemon describes some commands at length. */
-function shortenLabel(text: string): string {
-  const single = text.replace(/\s+/g, " ").trim();
-  if (single.length <= MAX_LABEL_LENGTH) return single;
-  return `${single.slice(0, MAX_LABEL_LENGTH - 1)}…`;
+/** Collapse the daemon's multi-line descriptions into one readable line. */
+function singleLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -93,7 +89,7 @@ export function buildPetSlashCommands(
     byName.set(command.name, {
       name: command.name,
       insert: `/${command.name}`,
-      label: shortenLabel(known ?? command.description ?? `/${command.name}`),
+      label: singleLine(known ?? command.description ?? `/${command.name}`),
       source: command.name.startsWith("paseo") ? "paseo" : "dsh",
     });
   }
@@ -101,7 +97,7 @@ export function buildPetSlashCommands(
     byName.set(command.name, {
       name: command.name,
       insert: `/${command.name}`,
-      label: shortenLabel(CLIENT_COMMAND_LABELS[command.kind] ?? command.description),
+      label: singleLine(CLIENT_COMMAND_LABELS[command.kind] ?? command.description),
       source: "paseo",
     });
   }
