@@ -88,7 +88,7 @@ export function buildPetSlashCommands(
     const known = REMOTE_COMMAND_LABELS[command.name];
     byName.set(command.name, {
       name: command.name,
-      insert: `/${command.name}`,
+      insert: `/${command.name} `,
       label: singleLine(known ?? command.description ?? `/${command.name}`),
       source: command.name.startsWith("paseo") ? "paseo" : "dsh",
     });
@@ -96,7 +96,7 @@ export function buildPetSlashCommands(
   for (const command of CLIENT_SLASH_COMMANDS) {
     byName.set(command.name, {
       name: command.name,
-      insert: `/${command.name}`,
+      insert: `/${command.name} `,
       label: singleLine(CLIENT_COMMAND_LABELS[command.kind] ?? command.description),
       source: "paseo",
     });
