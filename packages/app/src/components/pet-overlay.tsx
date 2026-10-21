@@ -39,10 +39,10 @@
 import { useQuery } from "@tanstack/react-query";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Image } from "expo-image";
+import { DshIcon } from "@/components/icons/dsh-icon";
 import {
   Archive,
   Cpu,
-  Fish,
   Minimize2,
   SlidersHorizontal,
   SquarePen,
@@ -1145,7 +1145,7 @@ export function PetOverlay() {
                       {command.source === "paseo" ? (
                         <Image source={PASEO_MARK} style={styles.menuItemMark} contentFit="contain" />
                       ) : (
-                        <Fish size={16} color={theme.colors.foregroundMuted} />
+                        <DshIcon size={16} />
                       )}
                       <Text style={[styles.menuItemLabel, { color: theme.colors.foreground }]}>
                         {command.label}

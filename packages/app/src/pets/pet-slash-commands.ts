@@ -66,31 +66,42 @@ const REMOTE_COMMAND_LABELS: Readonly<Record<string, string>> = {
   commit: "提交改动",
 };
 
+/** Longest label shown in the sheet before it is shortened. */
+const MAX_LABEL_LENGTH = 22;
+
+/** Keep one-line entries readable: the daemon describes some commands at length. */
+function shortenLabel(text: string): string {
+  const single = text.replace(/\s+/g, " ").trim();
+  if (single.length <= MAX_LABEL_LENGTH) return single;
+  return `${single.slice(0, MAX_LABEL_LENGTH - 1)}…`;
+}
+
 /**
  * The commands the long-press menu offers: the local client commands plus every
- * command the daemon reports for the focused agent (model, mode, compact, …).
+ * command the daemon reports for the focused agent.
  *
- * Remote entries are keyed by name and win over local ones, except that a local
- * command keeps its Chinese label when we have one — the daemon only describes
- * itself in its own words.
+ * The daemon mixes two families: Paseo's own skills (`/paseo`, `/paseo-advisor`,
+ * …) and the agent's commands (`/goal`, `/rewind`, …). Only the name tells them
+ * apart, so the source badge is decided by prefix rather than by who sends it.
  */
 export function buildPetSlashCommands(
   remote: readonly RemoteSlashCommand[] = [],
 ): PetSlashCommand[] {
   const byName = new Map<string, PetSlashCommand>();
   for (const command of remote) {
+    const known = REMOTE_COMMAND_LABELS[command.name];
     byName.set(command.name, {
       name: command.name,
       insert: `/${command.name}`,
-      label: REMOTE_COMMAND_LABELS[command.name] ?? (command.description || `/${command.name}`),
-      source: "dsh",
+      label: shortenLabel(known ?? command.description ?? `/${command.name}`),
+      source: command.name.startsWith("paseo") ? "paseo" : "dsh",
     });
   }
   for (const command of CLIENT_SLASH_COMMANDS) {
     byName.set(command.name, {
       name: command.name,
       insert: `/${command.name}`,
-      label: CLIENT_COMMAND_LABELS[command.kind] ?? command.description,
+      label: shortenLabel(CLIENT_COMMAND_LABELS[command.kind] ?? command.description),
       source: "paseo",
     });
   }
