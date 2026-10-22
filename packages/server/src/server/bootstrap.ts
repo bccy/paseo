@@ -1,3 +1,4 @@
+import { createWorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
 import type { PluginRegistries } from "@getpaseo/protocol/plugin-registry";
 import { describeHookWorkspace } from "./plugins/lifecycle/index.js";
 import express from "express";
@@ -172,6 +173,7 @@ import { createConfiguredTerminalManager } from "../terminal/terminal-manager-fa
 import { applyTerminalAgentHookSetting } from "../terminal/agent-hooks/terminal-agent-hook-setting.js";
 import { loadOrCreateDaemonKeyPair } from "./daemon-keypair.js";
 import { createRelayRuntime, type RelayRuntime } from "./relay-runtime.js";
+import { admitSecuredRelaySocket } from "./websocket/secure-relay-ingress.js";
 import type { PushNotificationSender } from "./push/index.js";
 import { getOrCreateServerId } from "./server-id.js";
 import { resolveDaemonVersion } from "./daemon-version.js";
@@ -423,6 +425,7 @@ export interface PaseoDaemonConfig {
   agentStoragePath: string;
   relayEnabled?: boolean;
   relayEnabledMutable?: boolean;
+  relayRequireProtectedSecurity?: boolean;
   relayEndpoint?: string;
   relayPublicEndpoint?: string;
   relayUseTls?: boolean;
@@ -538,11 +541,18 @@ function resolveExpressTrustProxySetting(config: PaseoDaemonConfig): true | stri
   return config.trustedProxies ?? ["loopback"];
 }
 
+function createInitialRelayConfig(config: PaseoDaemonConfig): MutableDaemonConfig["relay"] {
+  return {
+    enabled: config.relayEnabled ?? true,
+    requireProtectedSecurity: config.relayRequireProtectedSecurity ?? false,
+  };
+}
+
 function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDaemonConfig {
   const providers = config.providerOverrides ?? {};
 
   const initialConfig: MutableDaemonConfig = {
-    relay: { enabled: config.relayEnabled ?? true },
+    relay: createInitialRelayConfig(config),
     mcp: {
       enabled: config.mcpEnabled ?? true,
       injectIntoAgents: config.mcpInjectIntoAgents ?? true,
@@ -905,7 +915,17 @@ export async function createPaseoDaemon(
       forgeOverrides: { github },
     },
   });
-  workspaceRegistry.subscribeToMutations((mutation) => {
+  const workspaceRuntimeStore = createWorkspaceRuntimeStore();
+  workspaceGitService.onSnapshotUpdated((snapshot) => workspaceRuntimeStore.set(snapshot));
+  workspaceRegistry.subscribeToMutations(async (mutation) => {
+    if (mutation.kind === "remove" && mutation.workspace) {
+      const cwd = path.resolve(mutation.workspace.cwd);
+      const workspaces = await workspaceRegistry.list();
+      const hasActiveWorkspace = workspaces.some(
+        (workspace) => !workspace.archivedAt && path.resolve(workspace.cwd) === cwd,
+      );
+      if (!hasActiveWorkspace) workspaceRuntimeStore.remove(cwd);
+    }
     if (mutation.kind === "archive" && mutation.workspace) {
       pluginRuntime.emit("workspace.archived", {
         workspace: describeHookWorkspace(mutation.workspace),
@@ -975,6 +995,7 @@ export async function createPaseoDaemon(
     agentStorage,
   );
   await agentStorage.initialize();
+  await closeStaleAgentRecords(agentStorage);
   logger.info({ elapsed: elapsed() }, "Agent storage initialized");
   await bootstrapWorkspaceRegistries({
     serverId,
@@ -1015,6 +1036,7 @@ export async function createPaseoDaemon(
     logger,
     paseoHome: config.paseoHome,
     workspaceGitService,
+    workspaceRuntimeStore,
   });
   const archiveWorkspaceRecordExternal = async (
     workspaceId: string,
@@ -1393,6 +1415,15 @@ export async function createPaseoDaemon(
   const createAgentToolHostDependencies = (
     runtime: PaseoToolRuntimeContext,
   ): PaseoToolHostDependencies => ({
+    agentMessages: () => {
+      if (!wsServer) throw new Error("Daemon is not accepting agent messages");
+      return wsServer.agentMessages;
+    },
+    serverId,
+    hosts: () => {
+      if (!wsServer) throw new Error("Daemon is not accepting host operations");
+      return wsServer.toolHosts();
+    },
     agentManager,
     agentStorage,
     terminalManager,
@@ -1424,7 +1455,7 @@ export async function createPaseoDaemon(
       terminalManager,
       workspaceRegistry,
       projectRegistry,
-      workspaceGitService,
+      workspaceRuntimeStore,
       getDaemonTcpPort: () => (boundListenTarget?.type === "tcp" ? boundListenTarget.port : null),
       getDaemonTcpHost: () => (boundListenTarget?.type === "tcp" ? boundListenTarget.host : null),
       serviceProxyPublicBaseUrl,
@@ -1700,6 +1731,7 @@ export async function createPaseoDaemon(
                 startPaused: true,
               },
               workspaceAutoName,
+              workspaceRuntimeStore,
               daemonAuth,
               speechService,
               terminalManager,
@@ -1735,14 +1767,17 @@ export async function createPaseoDaemon(
                   return appBaseUrl;
                 },
                 desktopManaged: config.desktopManaged === true,
-                getRelayConfig: () =>
-                  relayRuntime?.getConfig() ?? {
+                getRelayConfig: () => ({
+                  ...(relayRuntime?.getConfig() ?? {
                     enabled: daemonConfigStore.get().relay?.enabled ?? relayEnabled,
                     endpoint: relayEndpoint,
                     publicEndpoint: relayPublicEndpoint,
                     useTls: relayUseTls,
                     publicUseTls: relayPublicUseTls,
-                  },
+                  }),
+                  requireProtectedSecurity:
+                    daemonConfigStore.get().relay?.requireProtectedSecurity === true,
+                }),
               },
               serviceProxyPublicBaseUrl,
               browserToolsBroker,
@@ -1756,6 +1791,7 @@ export async function createPaseoDaemon(
             await pluginRuntime.start();
             providerSnapshotManager.settlePluginProviders();
             wsServer.beginAcceptingConnections();
+            const relaySecurityLogger = logger.child({ module: "relay-security" });
             relayRuntime = createRelayRuntime({
               config: {
                 enabled: relayEnabled,
@@ -1765,12 +1801,25 @@ export async function createPaseoDaemon(
                 publicUseTls: relayPublicUseTls,
               },
               logger,
-              attachSocket: async (ws, metadata) => {
-                if (!wsServer) throw new Error("WebSocket server is not ready");
-                await wsServer.attachExternalSocket(ws, metadata);
-              },
+              attachSocket: (ws, metadata) =>
+                admitSecuredRelaySocket(
+                  ws,
+                  {
+                    daemonKeyPair: daemonKeyPair.keyPair,
+                    logger: relaySecurityLogger,
+                    requireProtectedMode: () =>
+                      daemonConfigStore.get().relay?.requireProtectedSecurity === true,
+                  },
+                  async (secured) => {
+                    if (!wsServer) throw new Error("WebSocket server is not ready");
+                    await wsServer.attachExternalSocket(secured.socket, {
+                      ...metadata,
+                      transport: "relay",
+                      securityMode: secured.securityMode,
+                    });
+                  },
+                ),
               serverId,
-              daemonKeyPair: daemonKeyPair.keyPair,
             });
             daemonConfigStore.onFieldChange("relay.enabled", (value) => {
               relayRuntime?.setEnabled(value === true);
@@ -1825,6 +1874,7 @@ export async function createPaseoDaemon(
     scriptHealthMonitor.stop();
     // Freeze both ingress and registration before taking the agent closure snapshot.
     wsServer?.prepareForShutdown();
+    await wsServer?.agentMessages.close();
     agentManager.prepareForShutdown();
     await closeAllAgents(logger, agentManager);
     await withTimeout({
@@ -1875,6 +1925,16 @@ export async function createPaseoDaemon(
     getListenTarget: () => boundListenTarget,
     getServerId: () => serverId,
   };
+}
+
+async function closeStaleAgentRecords(agentStorage: AgentStorage): Promise<void> {
+  // No provider runtimes are loaded at startup. Repair interrupted
+  // shutdowns before any status consumer sees the persisted active states.
+  for (const record of await agentStorage.list()) {
+    if (record.lastStatus === "running" || record.lastStatus === "initializing") {
+      await agentStorage.upsert({ ...record, lastStatus: "closed" });
+    }
+  }
 }
 
 /**
