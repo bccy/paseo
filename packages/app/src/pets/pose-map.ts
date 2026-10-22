@@ -165,8 +165,8 @@ interface ToolPoseRule {
 /**
  * Tool name (lowercased, matched by substring) -> standee. First match wins, so
  * the more specific rules (`deploy`, `playwright`, `clean`) sit above the broad
- * shell/exec family. Unmatched tool names fall back to the generic `tool`
- * standee, which is also what keeps that asset reachable.
+ * shell/exec family. Unmatched tool names fall back to `work-ram` (the
+ * standee with the memory bar) — the user's choice for the generic case.
  */
 export const TOOL_POSE_RULES: readonly ToolPoseRule[] = [
   { pattern: /deploy|publish|release|git push|push|ship|gh /i, pose: "work-deploy" },
@@ -222,7 +222,7 @@ export function resolveToolPose(
   for (const rule of TOOL_POSE_RULES) {
     if (rule.pattern.test(name)) return rule.pose;
   }
-  return "tool";
+  return "work-ram";
 }
 
 /** Tap reactions. The whole standee is one button, so these rotate per tap. */
