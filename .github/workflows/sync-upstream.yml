@@ -82,7 +82,11 @@ jobs:
           git push origin "$BRANCH"
           # 建 PR 需要仓库开启 "Allow GitHub Actions to create and approve pull requests"；
           # 没开时退化为只推分支并打印链接，不让整次同步失败。
-          gh pr create --base ios-ipa --head "$BRANCH" \
-            --title "同步上游 main（有冲突，需手动解决）" \
-            --body "自动把 getpaseo/paseo 的 main 合进 ios-ipa 时产生冲突。解决冲突并合并后，ios-ipa 的 push 会自动触发打包。" \
+          # 用 REST 而不是 gh pr create：fork 仓库里 GraphQL 的 createPullRequest
+          # 常被判为 integration 越权，REST 的权限检查相对宽松。
+          gh api "repos/${{ github.repository }}/pulls" -X POST \
+            -f title="同步上游 main（有冲突，需手动解决）" \
+            -f head="$BRANCH" \
+            -f base="ios-ipa" \
+            -f body="自动把 getpaseo/paseo 的 main 合进 ios-ipa 时产生冲突。解决冲突并合并后，ios-ipa 的 push 会自动触发打包。" \
           || echo "::warning::无法自动创建 PR，请手动打开 https://github.com/bccy/paseo/pull/new/$BRANCH"
