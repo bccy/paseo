@@ -71,7 +71,11 @@ jobs:
           set -euo pipefail
           BRANCH="sync/upstream-$(date -u +%Y%m%d-%H%M)"
           git checkout -b "$BRANCH"
-          git merge --no-edit FETCH_HEAD || true
+          git merge --no-commit --no-ff FETCH_HEAD || true
+          # GITHUB_TOKEN 不能推送 workflow 文件，所以上游带进来的 workflow 一律丢弃，
+          # 保留本仓库自己的（`workflows` 权限只对 PAT 开放）。
+          git checkout HEAD -- .github/workflows/ 2>/dev/null || true
+          git clean -fd .github/workflows/ 2>/dev/null || true
           git add -u
           git add $(git ls-files --others --exclude-standard) 2>/dev/null || true
           git commit -m "wip: merge upstream main into ios-ipa (conflicts need resolution)" || true
