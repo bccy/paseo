@@ -57,16 +57,11 @@ const patchedPackages = [
   },
   // iOS 27.1 raises NSInvalidArgumentException from canLoadObject(ofClass: PHLivePhoto.self);
   // check mediaTypes first so the provider is not queried when live photos were not requested.
-  // Upstream fix: https://github.com/expo/expo/pull/50435 (only shipped in SDK 58).
+  // Upstream fix: https://github.com/expo/expo/pull/50435 — merged to duo/pickers-anchor-popover,
+  // not to a release branch, so 57.0.20 still has the crashing order.
   {
     nodeModulesPath: "node_modules/expo-image-picker",
     patchPrefix: "expo-image-picker+",
-  },
-  // 10-bit HDR HEIC makes renderAsync throw ERR_IMAGE_CONTEXT_LOST on iOS; every picked iPhone
-  // photo fails without this. Upstream fix: https://github.com/expo/expo/pull/50011 (SDK 58 only).
-  {
-    nodeModulesPath: "node_modules/expo-image-manipulator",
-    patchPrefix: "expo-image-manipulator+",
   },
 ];
 
