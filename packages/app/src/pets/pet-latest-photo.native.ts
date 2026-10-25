@@ -5,15 +5,17 @@
  * focused chat draft. It does not send anything: the composer keeps its normal
  * "attachment pill + send button" flow.
  *
- * `expo-media-library` is imported from its main entry: the 18.x line (what
- * Expo SDK 54 resolves) still exports `getAssetsAsync` / `getAssetInfoAsync`
- * there and they are the working API — the `/legacy` subpath only exists on
- * later majors that moved these functions out of the root.
+ * The query API lives on the `/legacy` subpath. Expo SDK 57's media library
+ * (57.x) keeps `getAssetsAsync` / `getAssetInfoAsync` only there: the root
+ * entry still exports the same names, but they throw `errorOnLegacyMethodUse`
+ * instead of querying. Importing the root entry silently broke the double tap
+ * after the SDK 54 -> 57 upgrade, because the throw was swallowed by the catch
+ * below and the gesture just did nothing.
  *
  * @module paseo/pets/pet-latest-photo
  */
 
-import * as MediaLibrary from "expo-media-library";
+import * as MediaLibrary from "expo-media-library/legacy";
 import { normalizePickedImageAssets } from "@/hooks/image-attachment-picker";
 import { persistAttachmentFromFileUri } from "@/attachments/service";
 import type { AttachmentMetadata } from "@/attachments/types";
