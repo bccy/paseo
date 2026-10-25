@@ -55,18 +55,6 @@ const patchedPackages = [
     patchPrefix: "@opencode-ai+sdk+",
     cwd: "packages/server",
   },
-  // iOS 27.1 raises NSInvalidArgumentException from canLoadObject(ofClass: PHLivePhoto.self);
-  // check mediaTypes first so the provider is not queried when live photos were not requested.
-  // Upstream fix: https://github.com/expo/expo/pull/50435 — merged to duo/pickers-anchor-popover,
-  // not to a release branch, so 57.0.20 still has the crashing order. 58.0.5 is the first
-  // release carrying it; drop this patch when the app moves to SDK 58.
-  // npm hoists the package under packages/app, not the workspace root — registering the root
-  // path made existsSync fail, which skipped the patch silently.
-  {
-    nodeModulesPath: "packages/app/node_modules/expo-image-picker",
-    patchPrefix: "expo-image-picker+",
-    cwd: "packages/app",
-  },
 ];
 
 const installedPackages = patchedPackages.filter(({ nodeModulesPath }) =>
