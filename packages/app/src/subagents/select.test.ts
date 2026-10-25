@@ -296,7 +296,10 @@ describe("selectSubagentsForParent", () => {
     expect(childRows.map((row) => row.id)).toEqual(["grandchild"]);
   });
 
-  it("sorts by createdAt ascending", () => {
+  // The track used to list subagents oldest-first. It now leads with whatever needs the user
+  // and puts the newest row on top within each band, so a just-started subagent is visible
+  // without scrolling. This assertion is inverted on purpose — the old order was the bug.
+  it("sorts newest first within a status band", () => {
     setAgents([
       makeAgent({ id: "parent" }),
       makeAgent({
@@ -325,7 +328,97 @@ describe("selectSubagentsForParent", () => {
       EMPTY_PENDING_ARCHIVE_IDS,
     );
 
-    expect(rows.map((row) => row.id)).toEqual(["first", "second", "third"]);
+    expect(rows.map((row) => row.id)).toEqual(["third", "second", "first"]);
+  });
+
+  // The creation times run opposite to the status order on purpose: a createdAt-only sort
+  // would produce the exact reverse of what status ranking must produce, so this fails if the
+  // rank comparison is dropped.
+  it("leads with attention, then failures, then work in flight, then settled rows", () => {
+    setAgents([
+      makeAgent({ id: "parent" }),
+      makeAgent({
+        id: "needs-user",
+        parentAgentId: "parent",
+        status: "idle",
+        requiresAttention: true,
+        createdAt: new Date("2026-03-08T10:01:00.000Z"),
+      }),
+      makeAgent({
+        id: "failed",
+        parentAgentId: "parent",
+        status: "error",
+        createdAt: new Date("2026-03-08T10:02:00.000Z"),
+      }),
+      makeAgent({
+        id: "active",
+        parentAgentId: "parent",
+        status: "running",
+        createdAt: new Date("2026-03-08T10:03:00.000Z"),
+      }),
+      makeAgent({
+        id: "settled",
+        parentAgentId: "parent",
+        status: "idle",
+        createdAt: new Date("2026-03-08T10:04:00.000Z"),
+      }),
+    ]);
+
+    const rows = selectSubagentsForParent(
+      useSessionStore.getState(),
+      {
+        serverId: SERVER_ID,
+        parentAgentId: "parent",
+      },
+      EMPTY_PENDING_ARCHIVE_IDS,
+    );
+
+    expect(rows.map((row) => row.id)).toEqual(["needs-user", "failed", "active", "settled"]);
+  });
+
+  // Provider rows spell "failed" where managed rows spell "error". Ranking must recognise both,
+  // otherwise a failed provider child falls through to the settled band and sorts below a
+  // still-running one. The timestamps run opposite to the expected order so a createdAt-only
+  // sort cannot produce it by accident.
+  it("ranks a failed provider child with the failures, above work in flight", () => {
+    useProviderSubagentStore.getState().applyUpdate(SERVER_ID, {
+      kind: "upsert",
+      subagent: {
+        id: "provider-running",
+        parentAgentId: "parent-a",
+        provider: "codex",
+        title: "Running child",
+        description: null,
+        subtitle: null,
+        status: "running",
+        createdAt: "2026-03-08T10:03:00.000Z",
+        updatedAt: "2026-03-08T10:03:00.000Z",
+        toolCallId: null,
+      },
+    });
+    useProviderSubagentStore.getState().applyUpdate(SERVER_ID, {
+      kind: "upsert",
+      subagent: {
+        id: "provider-failed",
+        parentAgentId: "parent-a",
+        provider: "codex",
+        title: "Failed child",
+        description: null,
+        subtitle: null,
+        status: "failed",
+        createdAt: "2026-03-08T10:01:00.000Z",
+        updatedAt: "2026-03-08T10:01:00.000Z",
+        toolCallId: null,
+      },
+    });
+
+    const rows = selectProviderSubagentsForParent(
+      useProviderSubagentStore.getState(),
+      { serverId: SERVER_ID, parentAgentId: "parent-a" },
+      true,
+    );
+
+    expect(rows.map((row) => row.id)).toEqual(["provider-failed", "provider-running"]);
   });
 
   it("maps only row-rendered fields and does not expose onOpen", () => {
@@ -557,7 +650,8 @@ describe("createSubagentsForParentSelector", () => {
     const after = select(useSessionStore.getState());
 
     expect(after).not.toBe(before);
-    expect(after.map((row) => row.id)).toEqual(["child-a", "child-b"]);
+    // child-b is newer, and the track now puts the newest row on top within a band.
+    expect(after.map((row) => row.id)).toEqual(["child-b", "child-a"]);
   });
 
   it("keeps the previous rows when a changed agents map yields the same rows", () => {
