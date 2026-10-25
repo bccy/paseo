@@ -1203,7 +1203,7 @@ export function PetOverlay() {
 
 const styles = StyleSheet.create({
   host: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
   },
   pet: {
     position: "absolute",
@@ -1228,12 +1228,12 @@ const styles = StyleSheet.create({
   // from the app theme at the call site so the sheet matches the rest of Paseo,
   // including light mode.
   menuBackdrop: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     justifyContent: "flex-end",
     backgroundColor: "rgba(0, 0, 0, 0.35)",
   },
   menuDismiss: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
   },
   menuSheet: {
     marginHorizontal: 12,

@@ -15,7 +15,7 @@ name: iOS signed ipa
 
 on:
   push:
-    branches: [ios-ipa]
+    branches: [ios-ipa, "trial/**"]
   workflow_dispatch:
 
 env:
