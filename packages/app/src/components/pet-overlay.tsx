@@ -162,11 +162,19 @@ const PEEK_SNAP_PX = peekSnapThreshold(PET_SIZE);
 /** Shared by the position and the peek shift so both settle at the same rate. */
 const SETTLE_SPRING = { damping: 18, stiffness: 180 } as const;
 /**
- * Vertical space reserved at the bottom for the composer. The pet must never
- * rest below the input bar: when the keyboard opens the bar rises with it, and
- * a standee parked at the bottom would end up hidden behind the keyboard.
+ * Height of the composer's input bar above the bottom safe area, in points.
+ *
+ * Summed from `composer/input/input.tsx`'s `inputWrapper` at the mobile (`xs`)
+ * breakpoint, which is what the pet has to clear:
+ *
+ *   paddingTop 8 + text input minHeight 30 + row gap 12 + button row 28
+ *   + paddingBottom 8 + border 1×2 = 88
+ *
+ * The button row (attach / model / send) is the part a text-only 64 missed —
+ * 64 only covered the text area, so a bottom-peek ended up on the *lower* edge
+ * of the input bar on a device with a home indicator.
  */
-const COMPOSER_GUARD = 64;
+const COMPOSER_GUARD = 88;
 /** Screens where a pet would be noise rather than company. */
 const HIDDEN_ROUTES = new Set(["/welcome", "/pair-scan", "/open-project"]);
 
@@ -823,7 +831,15 @@ export function PetOverlay() {
   const minX = EDGE_MARGIN;
   const maxX = Math.max(EDGE_MARGIN, width - PET_SIZE - EDGE_MARGIN);
   const minY = topInset + EDGE_MARGIN;
-  const maxY = Math.max(minY, height - PET_SIZE - EDGE_MARGIN - COMPOSER_GUARD - keyboardHeight);
+  // The composer sits inside the bottom safe area (`paddingBottom: insets.bottom`
+  // in the dock), so its top edge is `COMPOSER_GUARD + bottomInset` above the
+  // screen bottom. A bottom peek puts its ledge line exactly on this value —
+  // leaving `bottomInset` out is what parked her on the lower edge of the input
+  // bar on devices with a home indicator.
+  const maxY = Math.max(
+    minY,
+    height - PET_SIZE - EDGE_MARGIN - COMPOSER_GUARD - bottomInset - keyboardHeight,
+  );
 
   // Upstream soft set: wm-breathe (-4px over 3.4s) and wm-sway (0 -> 1.2deg / 6s).
   useEffect(() => {

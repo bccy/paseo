@@ -31,8 +31,11 @@ const EDGE_MARGIN = 10;
 /**
  * The snap distance in points, spelled out rather than derived: `SIZE * ratio`
  * would let a changed ratio keep its own test green.
+ *
+ * 20pt is the value the device feedback settled on — a half body (38pt) meant a
+ * peek only let go after a long pull.
  */
-const THRESHOLD_PT = 38;
+const THRESHOLD_PT = 20;
 
 /**
  * The crop lines measured off the artwork's alpha channel, spelled out here on
@@ -159,7 +162,7 @@ describe("snapToPeekEdge", () => {
 });
 
 describe("peekSnapThreshold", () => {
-  it("is half a body at the shipped size", () => {
+  it("is the shipped 20pt at the shipped size", () => {
     // The number the drop handler actually gets. Pinned to an absolute value so
     // a changed ratio cannot ride along on its own derivation.
     expect(peekSnapThreshold(SIZE)).toBeCloseTo(THRESHOLD_PT, 6);

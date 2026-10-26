@@ -169,11 +169,12 @@ export const PEEK_ANCHORS: Readonly<Record<PeekEdge, { x: number; y: number }>> 
  * How close the dropped cell must be to an edge to snap to it, as a fraction of
  * the pet's own size.
  *
- * Half a body is the loose end of "the user clearly aimed for the edge" without
- * turning the middle of the screen into a snap zone: at 76pt it means 38pt, and
- * anything wider starts swallowing deliberate placements next to the edge.
+ * About a quarter of a body — 20pt at the shipped 76pt standee. The first value
+ * tried was half a body (38pt), which on the device meant a peek only let go
+ * after a long pull; a quarter is the point where nudging her off the edge
+ * releases it, while a dropped-on-the-edge pet still settles back.
  */
-export const PEEK_SNAP_RATIO = 0.5;
+export const PEEK_SNAP_RATIO = 20 / 76;
 
 /** The snap distance in points for a standee of `size` points. */
 export function peekSnapThreshold(size: number): number {
