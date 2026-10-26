@@ -174,7 +174,7 @@ export const PEEK_ANCHORS: Readonly<Record<PeekEdge, { x: number; y: number }>> 
  * after a long pull; a quarter is the point where nudging her off the edge
  * releases it, while a dropped-on-the-edge pet still settles back.
  */
-export const PEEK_SNAP_RATIO = 20 / 85;
+export const PEEK_SNAP_RATIO = 12 / 85;
 
 /** The snap distance in points for a standee of `size` points. */
 export function peekSnapThreshold(size: number): number {

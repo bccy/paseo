@@ -53,7 +53,15 @@ import {
 } from "lucide-react-native";
 import { usePathname } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from "react-native";
+import {
+  Keyboard,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  useWindowDimensions,
+  View,
+} from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
   Easing,
@@ -70,7 +78,7 @@ import { useUnistyles } from "react-native-unistyles";
 import { useShallow } from "zustand/shallow";
 import { resolveFocusedChatTarget } from "@/composer/focused-chat-target";
 import { useHostRuntimeClient } from "@/runtime/host-runtime";
-import { useComposerInsetStore, useKeyboardLiftStore } from "@/stores/composer-inset-store";
+import { useComposerInsetStore, useKeyboardClearanceStore } from "@/stores/composer-inset-store";
 import { useDraftStore } from "@/stores/draft-store";
 import {
   useActiveWorkspaceSelection,
@@ -807,8 +815,21 @@ export function PetOverlay() {
   // not from `Keyboard`'s `endCoordinates.height`: the dock adds the bottom safe
   // area and a `bottomClearance` on top of that, so deriving the number here left
   // the pet a safe-area taller than the bar she hangs from.
-  const keyboardLift = useKeyboardLiftStore((state) => state.lift);
-  const keyboardHeight = keyboardLift ?? 0;
+  // `KeyboardTranslateView` lifts the composer by the keyboard height plus a
+  // clearance the dock reports. `endCoordinates.height` already spans the safe
+  // area, so the pet reads the event and adds only that clearance.
+  const keyboardClearance = useKeyboardClearanceStore((state) => state.clearance);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  useEffect(() => {
+    const show = Keyboard.addListener("keyboardWillShow", (event) => {
+      setKeyboardHeight(event.endCoordinates.height + keyboardClearance);
+    });
+    const hide = Keyboard.addListener("keyboardWillHide", () => setKeyboardHeight(0));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, [keyboardClearance]);
   const preKeyboardYRef = useRef<number | null>(null);
 
   const minX = EDGE_MARGIN;
@@ -1114,11 +1135,17 @@ export function PetOverlay() {
                 : startedOn === "bottom"
                   ? -event.translationY
                   : 0;
-          const released = startedOn !== null && pulled >= PEEK_SNAP_PX;
           dragStartEdge.value = null;
-          const edge = released
-            ? null
-            : resolvePeekEdge({ x: x.value, y: y.value }, bounds, PEEK_SNAP_PX);
+          // A drag that began on an edge decides between "back to that same edge"
+          // and "free": re-running the position test here would read the folded
+          // offset (`x` starts 30.75pt outside `minX`), fail the side check and
+          // report some other edge — which is what made the standee teleport.
+          const edge =
+            startedOn === null
+              ? resolvePeekEdge({ x: x.value, y: y.value }, bounds, PEEK_SNAP_PX)
+              : pulled >= PEEK_SNAP_PX
+                ? null
+                : startedOn;
           const snapped = snapToPeekEdge(edge, { x: x.value, y: y.value }, bounds);
           // `snapToPeekEdge` hands the raw point back when no edge matched, so the
           // dropped-at-the-window-border case still has to be clamped. A snapped

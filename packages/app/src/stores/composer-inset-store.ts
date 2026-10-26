@@ -30,26 +30,27 @@ export const useComposerInsetStore = create<ComposerInsetState>((set) => ({
 }));
 
 /**
- * How far the keyboard has lifted the composer off its resting place.
+ * Extra distance `KeyboardTranslateView` adds on top of the keyboard height.
  *
- * The dock does not move by `keyboardWillShow.endCoordinates.height` alone: its
- * `KeyboardTranslateView` adds the bottom safe area and a `bottomClearance` on
- * top of it. The pet used to subscribe to the raw keyboard event and lift by
- * that, which left her a safe-area taller than the bar she is supposed to hang
- * from. Reporting the dock's own number removes the second source of truth.
+ * The composer does not rise by the keyboard height alone: the dock translates it
+ * by the keyboard height plus this clearance, which keeps a centered form from
+ * being pushed past the keyboard's top. The pet hangs a peek standee on the
+ * composer's ledge, so it has to lift by the same total.
  *
- * `null` means "no keyboard", which is also what the pet assumes before the
- * first report lands.
+ * Only the clearance is reported from the dock. The keyboard height itself is an
+ * `AnimatedMultiplication` there, and composed Animated nodes reject
+ * `addListener`, so trying to mirror the whole translation reported nothing and
+ * left the pet stationary while the bar rose.
  */
-interface KeyboardLiftState {
-  /** How far the composer has risen from its resting position, in points. */
-  lift: number | null;
-  setLift: (lift: number | null) => void;
+interface KeyboardClearanceState {
+  /** Points added to the keyboard height when the composer translates. */
+  clearance: number;
+  setClearance: (clearance: number) => void;
 }
 
-export const useKeyboardLiftStore = create<KeyboardLiftState>((set) => ({
-  lift: null,
-  setLift: (lift) => {
-    set((state) => (state.lift === lift ? state : { lift }));
+export const useKeyboardClearanceStore = create<KeyboardClearanceState>((set) => ({
+  clearance: 0,
+  setClearance: (clearance) => {
+    set((state) => (state.clearance === clearance ? state : { clearance }));
   },
 }));

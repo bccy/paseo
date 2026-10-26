@@ -35,7 +35,7 @@ const EDGE_MARGIN = 10;
  * 20pt is the value the device feedback settled on — a half body (38pt) meant a
  * peek only let go after a long pull.
  */
-const THRESHOLD_PT = 20;
+const THRESHOLD_PT = 12;
 
 /**
  * The crop lines measured off the artwork's alpha channel, spelled out here on
