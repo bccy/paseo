@@ -3,6 +3,7 @@ export { ComposerDockBackground } from "./internal/background";
 export { ComposerFullscreenBody, ComposerFullscreenFooter } from "./internal/fullscreen";
 import { ScrollView } from "@/components/ui/scroll-view";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useComposerInsetStore } from "@/stores/composer-inset-store";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { HEADER_INNER_HEIGHT } from "@/constants/layout";
 import { resolveContentMaxWidth, useAppSettings } from "@/hooks/use-settings";
@@ -127,6 +128,18 @@ export function ComposerDock({
   fullscreen = false,
 }: ComposerDockProps) {
   const insets = useSafeAreaInsets();
+  const setComposerInset = useComposerInsetStore((state) => state.setInset);
+  // The wrapper below pads by `insets.bottom`, so its measured height is exactly
+  // the distance from the screen bottom to the input bar's top edge. Reporting it
+  // beats any constant: a multi-line draft, a larger dynamic type size or a
+  // different home-indicator inset all change the number.
+  const reportComposerInset = useCallback(
+    (event: LayoutChangeEvent) => {
+      if (fullscreen) return;
+      setComposerInset(event.nativeEvent.layout.height);
+    },
+    [fullscreen, setComposerInset],
+  );
   const contentMaxWidth = resolveContentMaxWidth(useAppSettings().settings);
   const centeredClearance = useCenteredClearance(insets.bottom);
   // Preserve the existing centered form's visual balance on tablets.
@@ -210,6 +223,7 @@ export function ComposerDock({
                 ? fullscreenSurface
                 : [dockStyles.composer, { paddingBottom: insets.bottom }]
             }
+            onLayout={reportComposerInset}
           >
             {composer}
           </View>

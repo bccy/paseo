@@ -78,6 +78,7 @@ import { useUnistyles } from "react-native-unistyles";
 import { useShallow } from "zustand/shallow";
 import { resolveFocusedChatTarget } from "@/composer/focused-chat-target";
 import { useHostRuntimeClient } from "@/runtime/host-runtime";
+import { useComposerInsetStore } from "@/stores/composer-inset-store";
 import { useDraftStore } from "@/stores/draft-store";
 import {
   useActiveWorkspaceSelection,
@@ -162,19 +163,12 @@ const PEEK_SNAP_PX = peekSnapThreshold(PET_SIZE);
 /** Shared by the position and the peek shift so both settle at the same rate. */
 const SETTLE_SPRING = { damping: 18, stiffness: 180 } as const;
 /**
- * Height of the composer's input bar above the bottom safe area, in points.
- *
- * Summed from `composer/input/input.tsx`'s `inputWrapper` at the mobile (`xs`)
- * breakpoint, which is what the pet has to clear:
- *
- *   paddingTop 8 + text input minHeight 30 + row gap 12 + button row 28
- *   + paddingBottom 8 + border 1×2 = 88
- *
- * The button row (attach / model / send) is the part a text-only 64 missed —
- * 64 only covered the text area, so a bottom-peek ended up on the *lower* edge
- * of the input bar on a device with a home indicator.
+ * The composer reports its own height into `composer-inset-store`. Measuring it
+ * beats any constant we could write here: the bar grows with a multi-line draft,
+ * shifts with the dynamic type size, and its wrapper pads by the bottom safe
+ * area, which varies per device.
  */
-const COMPOSER_GUARD = 88;
+const FALLBACK_COMPOSER_INSET = 88;
 /** Screens where a pet would be noise rather than company. */
 const HIDDEN_ROUTES = new Set(["/welcome", "/pair-scan", "/open-project"]);
 
@@ -831,15 +825,15 @@ export function PetOverlay() {
   const minX = EDGE_MARGIN;
   const maxX = Math.max(EDGE_MARGIN, width - PET_SIZE - EDGE_MARGIN);
   const minY = topInset + EDGE_MARGIN;
-  // The composer sits inside the bottom safe area (`paddingBottom: insets.bottom`
-  // in the dock), so its top edge is `COMPOSER_GUARD + bottomInset` above the
-  // screen bottom. A bottom peek puts its ledge line exactly on this value —
-  // leaving `bottomInset` out is what parked her on the lower edge of the input
-  // bar on devices with a home indicator.
-  const maxY = Math.max(
-    minY,
-    height - PET_SIZE - EDGE_MARGIN - COMPOSER_GUARD - bottomInset - keyboardHeight,
-  );
+  // The dock's wrapper already pads by the bottom safe area, so its measured
+  // height is the ledge's distance from the screen bottom — no `bottomInset`
+  // term here, or the inset would be counted twice. A bottom peek puts its crop
+  // line exactly on that value. Before the first measurement lands there is
+  // nothing trustworthy to clamp against, so fall back to the previous constant
+  // for a frame rather than parking her on the screen edge.
+  const composerInset = useComposerInsetStore((state) => state.inset);
+  const composerLedge = composerInset ?? FALLBACK_COMPOSER_INSET + bottomInset;
+  const maxY = Math.max(minY, height - PET_SIZE - EDGE_MARGIN - composerLedge - keyboardHeight);
 
   // Upstream soft set: wm-breathe (-4px over 3.4s) and wm-sway (0 -> 1.2deg / 6s).
   useEffect(() => {
