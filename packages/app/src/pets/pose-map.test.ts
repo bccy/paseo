@@ -26,7 +26,7 @@ import {
  * not just the presence of the assets.
  */
 
-const SIZE = 76;
+const SIZE = 85;
 const EDGE_MARGIN = 10;
 /**
  * The snap distance in points, spelled out rather than derived: `SIZE * ratio`
@@ -169,7 +169,9 @@ describe("peekSnapThreshold", () => {
   });
 
   it("tracks the standee size", () => {
-    expect(peekSnapThreshold(152)).toBeCloseTo(THRESHOLD_PT * 2, 6);
+    // The doubling is derived from the shipped size on purpose: hard-coding 152
+    // silently stopped testing scaling the moment the standee was resized.
+    expect(peekSnapThreshold(SIZE * 2)).toBeCloseTo(THRESHOLD_PT * 2, 6);
   });
 
   it("keeps the ratio the threshold is built from", () => {

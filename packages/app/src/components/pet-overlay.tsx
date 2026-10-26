@@ -143,7 +143,7 @@ interface MachineSnapshot {
 }
 
 /** On-screen size of the standee, in points. Deliberately smaller than upstream. */
-const PET_SIZE = 76;
+const PET_SIZE = 85;
 /** Source pixels per point, used to rescale the upstream pixel amounts. */
 const ART_TO_SCREEN = PET_SIZE / 512;
 
