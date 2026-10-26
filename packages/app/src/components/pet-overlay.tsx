@@ -53,15 +53,7 @@ import {
 } from "lucide-react-native";
 import { usePathname } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Keyboard,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  useWindowDimensions,
-  View,
-} from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
   Easing,
@@ -78,7 +70,7 @@ import { useUnistyles } from "react-native-unistyles";
 import { useShallow } from "zustand/shallow";
 import { resolveFocusedChatTarget } from "@/composer/focused-chat-target";
 import { useHostRuntimeClient } from "@/runtime/host-runtime";
-import { useComposerInsetStore } from "@/stores/composer-inset-store";
+import { useComposerInsetStore, useKeyboardLiftStore } from "@/stores/composer-inset-store";
 import { useDraftStore } from "@/stores/draft-store";
 import {
   useActiveWorkspaceSelection,
@@ -803,24 +795,21 @@ export function PetOverlay() {
   // 0 while full-body, 1 while peeking. Dampens the idle loops (see `petStyle`):
   // a ledge that breathes and tilts stops looking attached to the composer.
   const peekWeight = useSharedValue(0);
+  /** Which edge the drag started from, so the drop handler can tell a pull-away from a nudge. */
+  const dragStartEdge = useSharedValue<"left" | "right" | "bottom" | null>(null);
 
   // The composer owns the bottom of the screen and rises with the keyboard.
   // Track the keyboard so the pet can be clamped above the input bar instead of
   // ending up hidden behind it, and remember where she was so closing the
   // keyboard puts her back instead of leaving her parked in the lifted spot.
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  //
+  // The lift comes from the dock's own translate graph (`useKeyboardLiftStore`),
+  // not from `Keyboard`'s `endCoordinates.height`: the dock adds the bottom safe
+  // area and a `bottomClearance` on top of that, so deriving the number here left
+  // the pet a safe-area taller than the bar she hangs from.
+  const keyboardLift = useKeyboardLiftStore((state) => state.lift);
+  const keyboardHeight = keyboardLift ?? 0;
   const preKeyboardYRef = useRef<number | null>(null);
-  useEffect(() => {
-    const show = Keyboard.addListener("keyboardWillShow", (event) => {
-      if (preKeyboardYRef.current === null) preKeyboardYRef.current = y.value;
-      setKeyboardHeight(event.endCoordinates.height);
-    });
-    const hide = Keyboard.addListener("keyboardWillHide", () => setKeyboardHeight(0));
-    return () => {
-      show.remove();
-      hide.remove();
-    };
-  }, [y]);
 
   const minX = EDGE_MARGIN;
   const maxX = Math.max(EDGE_MARGIN, width - PET_SIZE - EDGE_MARGIN);
@@ -940,6 +929,9 @@ export function PetOverlay() {
     // the lifted spot. Dragging while the keyboard is open overwrites the
     // memory on the next open, so this cannot fight a deliberate move.
     if (keyboardHeight > 0) {
+      // Remember the resting spot once per keyboard session so closing it puts
+      // her back where the user left her.
+      if (preKeyboardYRef.current === null) preKeyboardYRef.current = y.value;
       y.value = Math.min(Math.max(minY, y.value), maxY);
     } else if (preKeyboardYRef.current !== null) {
       y.value = Math.min(Math.max(minY, preKeyboardYRef.current), maxY);
@@ -1097,6 +1089,7 @@ export function PetOverlay() {
           originX.value = x.value;
           originY.value = y.value;
           pressScale.value = withSpring(1.08, { damping: 20, stiffness: 220 });
+          dragStartEdge.value = peekEdgeRef.current;
           runOnJS(dragStarted)();
           runOnJS(clearPeek)();
         })
@@ -1104,12 +1097,36 @@ export function PetOverlay() {
           x.value = originX.value + event.translationX;
           y.value = originY.value + event.translationY;
         })
-        .onEnd(() => {
-          const settledX = Math.min(Math.max(minX, x.value), maxX);
-          const settledY = Math.min(Math.max(minY, y.value), maxY);
+        .onEnd((event) => {
           const bounds = { minX, maxX, minY, maxY };
-          const edge = resolvePeekEdge({ x: settledX, y: settledY }, bounds, PEEK_SNAP_PX);
-          const resting = snapToPeekEdge(edge, { x: settledX, y: settledY }, bounds);
+          // A drag that starts on a peek edge is measured by how far it moved away
+          // from that edge, not by where the clamped cell ended up. `onStart` folds
+          // the peek offset into `x`, so a left peek begins the drag at x = -20.75 —
+          // 30.75pt outside `minX`. Judging the absolute position there means the
+          // user must pull 50pt before the threshold is met, which is what made the
+          // pet feel stuck to the edge. Pulling `PEEK_SNAP_PX` away releases it.
+          const startedOn = dragStartEdge.value;
+          const pulled =
+            startedOn === "left"
+              ? event.translationX
+              : startedOn === "right"
+                ? -event.translationX
+                : startedOn === "bottom"
+                  ? -event.translationY
+                  : 0;
+          const released = startedOn !== null && pulled >= PEEK_SNAP_PX;
+          dragStartEdge.value = null;
+          const edge = released
+            ? null
+            : resolvePeekEdge({ x: x.value, y: y.value }, bounds, PEEK_SNAP_PX);
+          const snapped = snapToPeekEdge(edge, { x: x.value, y: y.value }, bounds);
+          // `snapToPeekEdge` hands the raw point back when no edge matched, so the
+          // dropped-at-the-window-border case still has to be clamped. A snapped
+          // point is already one of the bounds and passes through unchanged.
+          const resting = {
+            x: Math.min(Math.max(minX, snapped.x), maxX),
+            y: Math.min(Math.max(minY, snapped.y), maxY),
+          };
           const shift = peekShift(edge, PET_SIZE, EDGE_MARGIN);
           x.value = withSpring(resting.x, SETTLE_SPRING);
           y.value = withSpring(resting.y, SETTLE_SPRING);

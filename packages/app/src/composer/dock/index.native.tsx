@@ -3,12 +3,12 @@ export { ComposerDockBackground } from "./internal/background";
 export { ComposerFullscreenBody, ComposerFullscreenFooter } from "./internal/fullscreen";
 import { ScrollView } from "@/components/ui/scroll-view";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useComposerInsetStore } from "@/stores/composer-inset-store";
+import { useComposerInsetStore, useKeyboardLiftStore } from "@/stores/composer-inset-store";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { HEADER_INNER_HEIGHT } from "@/constants/layout";
 import { resolveContentMaxWidth, useAppSettings } from "@/hooks/use-settings";
 import { KeyboardTranslateView } from "@/keyboard/shift";
-import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { View, type LayoutChangeEvent, type ViewProps, StyleSheet } from "react-native";
 import { StyleSheet as ThemedStyleSheet } from "react-native-unistyles";
 import Animated, {
@@ -18,6 +18,7 @@ import Animated, {
   type SharedValue,
 } from "react-native-reanimated";
 import { useKeyboardShift } from "@/keyboard/shift";
+import { useKeyboardAnimation } from "react-native-keyboard-controller";
 import {
   resolveCenteredClearance,
   resolveComposerSlotCapacity,
@@ -140,6 +141,40 @@ export function ComposerDock({
     },
     [fullscreen, setComposerInset],
   );
+  const setKeyboardLift = useKeyboardLiftStore((state) => state.setLift);
+  // The pet hangs a peek standee on the composer's ledge, so it needs the same
+  // lift this view applies — not the raw keyboard height. `KeyboardTranslateView`
+  // below adds the bottom safe area (scaled by `progress`) on top of the keyboard
+  // height, so reading the keyboard event alone left the pet one safe-area taller
+  // than the bar. Mirror the graph instead of re-deriving it.
+  const keyboard = useKeyboardAnimation();
+  useEffect(() => {
+    if (fullscreen) {
+      setKeyboardLift(null);
+      return;
+    }
+    // Both are RN `Animated` nodes, not reanimated shared values: track them with
+    // listeners so the reported lift follows the same frame as the translation.
+    let height = 0;
+    let progress = 0;
+    const emit = () => {
+      const lift = height > 0 ? height + progress * insets.bottom : 0;
+      setKeyboardLift(lift > 0 ? lift : null);
+    };
+    const heightId = keyboard.height.addListener(({ value }) => {
+      height = value;
+      emit();
+    });
+    const progressId = keyboard.progress.addListener(({ value }) => {
+      progress = value;
+      emit();
+    });
+    return () => {
+      keyboard.height.removeListener(heightId);
+      keyboard.progress.removeListener(progressId);
+      setKeyboardLift(null);
+    };
+  }, [fullscreen, insets.bottom, keyboard.height, keyboard.progress, setKeyboardLift]);
   const contentMaxWidth = resolveContentMaxWidth(useAppSettings().settings);
   const centeredClearance = useCenteredClearance(insets.bottom);
   // Preserve the existing centered form's visual balance on tablets.
