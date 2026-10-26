@@ -25,9 +25,22 @@
  * Every one of the 79 standees has at least one reachable path; the table of
  * paths lives in the task report (asserted by a throwaway coverage script).
  *
+ * Three more assets live outside that table: the `*-peek` family. They are not
+ * state poses — no `computeState` result maps to them — they are the art the
+ * renderer swaps in when the pet is dropped against a screen edge. `PEEK_POSES`
+ * and `PEEK_ANCHORS` own that mapping and the crop lines inside each frame.
+ *
  * @module paseo/pets/pose-map
  */
 
+/**
+ * Every standee the renderer can draw, keyed by the name the mapping tables use.
+ *
+ * 79 of these are the upstream `state-*` standees. The three `*-peek` entries are
+ * a second pose family: the whale is cropped by a wall or a ledge *inside* the
+ * 512px frame, so pushing her cell past a screen edge reads as half-hidden
+ * instead of clipped. `PEEK_POSES` below pairs each of them with its edge.
+ */
 export const POSE_ASSETS = {
   abstract: require("../../assets/pets/whale-musume/dsh-whale-state-abstract.webp"),
   achievement: require("../../assets/pets/whale-musume/dsh-whale-state-achievement.webp"),
@@ -108,9 +121,246 @@ export const POSE_ASSETS = {
   "work-slack": require("../../assets/pets/whale-musume/dsh-whale-state-work-slack.webp"),
   "work-slack-phone": require("../../assets/pets/whale-musume/dsh-whale-state-work-slack-phone.webp"),
   "work-sleep": require("../../assets/pets/whale-musume/dsh-whale-state-work-sleep.webp"),
+  "home-peek": require("../../assets/pets/whale-musume/dsh-whale-home-peek.webp"),
+  "workbench-peek": require("../../assets/pets/whale-musume/dsh-whale-workbench-peek.webp"),
+  "settings-peek": require("../../assets/pets/whale-musume/dsh-whale-settings-peek.webp"),
 } as const;
 
 export type PoseName = keyof typeof POSE_ASSETS;
+
+/** A screen edge the pet can hang off, showing only the half that pokes out. */
+export type PeekEdge = "bottom" | "left" | "right";
+
+/**
+ * Which peek standee belongs to each edge.
+ *
+ * The assignment follows the art, not the asset names: `settings-peek` is drawn
+ * against a wall on its **left** (the whale leans out to the right), so it can
+ * only hang off the left edge; `workbench-peek` is the mirror image and belongs
+ * on the right. `home-peek` is cropped by a horizontal ledge at the bottom.
+ * Pairing them the other way round would push the visible half off-screen.
+ */
+export const PEEK_POSES: Readonly<Record<PeekEdge, PoseName>> = {
+  bottom: "home-peek",
+  left: "settings-peek",
+  right: "workbench-peek",
+};
+
+/**
+ * Where the crop line sits inside each peek standee, as a fraction of the 512px
+ * frame, measured off the alpha channel.
+ *
+ * `bottom` is the last row of the ledge (the flat white bar the whale grips);
+ * `left` / `right` are the wall columns. The renderer puts this line exactly on
+ * the screen edge, which is what makes the pet read as half-hidden rather than
+ * simply cut off. Re-measure if the art is ever replaced.
+ *
+ * Both side anchors sit a little past the screen edge on purpose: the visible
+ * body ends up roughly 1pt outside the viewport, so the wall is always cropped
+ * rather than sometimes leaving a sliver of it inside the screen.
+ */
+export const PEEK_ANCHORS: Readonly<Record<PeekEdge, { x: number; y: number }>> = {
+  bottom: { x: 0.5, y: 0.895 },
+  left: { x: 0.273, y: 0.5 },
+  right: { x: 0.705, y: 0.5 },
+};
+
+/**
+ * How close the dropped cell must be to an edge to snap to it, as a fraction of
+ * the pet's own size.
+ *
+ * Half a body is the loose end of "the user clearly aimed for the edge" without
+ * turning the middle of the screen into a snap zone: at 76pt it means 38pt, and
+ * anything wider starts swallowing deliberate placements next to the edge.
+ */
+export const PEEK_SNAP_RATIO = 0.5;
+
+/** The snap distance in points for a standee of `size` points. */
+export function peekSnapThreshold(size: number): number {
+  "worklet";
+  return size * PEEK_SNAP_RATIO;
+}
+
+/** The cell rectangle the pet may rest in, in screen points. */
+export interface PetBounds {
+  readonly minX: number;
+  readonly maxX: number;
+  readonly minY: number;
+  readonly maxY: number;
+}
+
+/**
+ * Pull a cell position back inside `bounds`.
+ *
+ * Every path that can leave the cell outside them has to call this: the drop
+ * handler, and a *cancelled* pan — which never reaches `onEnd` at all, so it
+ * would otherwise strand the cell wherever the finger left it.
+ */
+export function clampToBounds(
+  position: { readonly x: number; readonly y: number },
+  bounds: PetBounds,
+): { readonly x: number; readonly y: number } {
+  "worklet";
+  return {
+    x: Math.min(Math.max(bounds.minX, position.x), bounds.maxX),
+    y: Math.min(Math.max(bounds.minY, position.y), bounds.maxY),
+  };
+}
+
+/**
+ * Where a *cancelled* drag should leave the cell.
+ *
+ * `onStart` folds the peek offset into the cell, so a cancelled pan (which never
+ * reaches `onEnd`) can be holding a cell outside the bounds — a left peek lands
+ * at `x = -20.75` for the shipped size. The peek state is cleared when the drag
+ * begins, so nothing else will correct it.
+ *
+ * A still-set `edge` is re-snapped first: `clearPeek` is dispatched through
+ * `runOnJS`, so the ref can legitimately still hold the old edge on the frame
+ * the gesture is cancelled.
+ */
+export function settleCancelledDrag(
+  position: { readonly x: number; readonly y: number },
+  edge: PeekEdge | null,
+  bounds: PetBounds,
+): { readonly x: number; readonly y: number } {
+  "worklet";
+  return clampToBounds(edge === null ? position : snapToPeekEdge(edge, position, bounds), bounds);
+}
+
+/**
+ * A persisted pet position as read back from storage.
+ *
+ * `edge` is always present here: `null` means "resting as a full body", which
+ * covers both a position saved while full-body and one saved before the edge
+ * feature existed.
+ */
+export interface StoredPetPosition {
+  x: number;
+  y: number;
+  edge: PeekEdge | null;
+}
+
+/**
+ * Read the persisted pet position.
+ *
+ * Returns `null` for anything that cannot be used as a position (unreadable
+ * JSON, a non-object, missing or non-finite coordinates) — the caller then
+ * keeps its default corner. A record that *is* readable but carries no valid
+ * `edge` still restores, as a full-body pet: that is the shape written before
+ * the edge feature existed, and rejecting it would throw away the user's
+ * position on upgrade.
+ *
+ * Never throws. Storage is user-visible state written by older builds.
+ */
+export function parseStoredPosition(raw: string): StoredPetPosition | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object") return null;
+  const record = parsed as Record<string, unknown>;
+  const { x, y } = record;
+  // `isFinite` also rejects the `Infinity` an overflowing literal like `1e999`
+  // parses to, which `typeof === "number"` alone would let through.
+  if (typeof x !== "number" || typeof y !== "number") return null;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return { x, y, edge: isPeekEdge(record.edge) ? record.edge : null };
+}
+
+/**
+ * How far the peek standee is shifted, in points, from the position of a
+ * full-body cell resting against the same edge.
+ *
+ * The shift lines the artwork's internal crop line up with the screen edge:
+ * a peek cell that sits at `edgeMargin` from the edge must move by the crop
+ * line's own distance into the frame, minus that margin. Both terms are
+ * constants, so the shift never depends on the viewport, the keyboard, or where
+ * along the edge the pet was dropped — which is what keeps the ledge glued to
+ * the composer bar when the keyboard lifts it.
+ *
+ * Only the across-the-edge axis moves; the other one stays where the user put
+ * her.
+ */
+export function peekShift(
+  edge: PeekEdge | null,
+  size: number,
+  edgeMargin: number,
+): { readonly x: number; readonly y: number } {
+  "worklet";
+  if (edge === null) return { x: 0, y: 0 };
+  const anchor = PEEK_ANCHORS[edge];
+  if (edge === "left") return { x: -anchor.x * size - edgeMargin, y: 0 };
+  if (edge === "right") return { x: size * (1 - anchor.x) + edgeMargin, y: 0 };
+  return { x: 0, y: size * (1 - anchor.y) + edgeMargin };
+}
+
+/**
+ * Which edge a dropped pet should snap to, or `null` to stay full-body.
+ *
+ * Corners satisfy two edges at once. Bottom wins: it keeps the horizontal
+ * position the user chose and parks her on the composer ledge, whereas a side
+ * snap would move her off the bottom and leave the peek floating in the middle
+ * of the screen. Left beats right only as a tie-break.
+ *
+ * `"worklet"` because the drop handler runs on the UI thread; it deliberately
+ * closes over nothing, so it stays safe to call from there.
+ */
+export function resolvePeekEdge(
+  position: { readonly x: number; readonly y: number },
+  bounds: {
+    readonly minX: number;
+    readonly maxX: number;
+    readonly minY: number;
+    readonly maxY: number;
+  },
+  threshold: number,
+): PeekEdge | null {
+  "worklet";
+  if (Math.abs(position.y - bounds.maxY) <= threshold) return "bottom";
+  if (Math.abs(position.x - bounds.minX) <= threshold) return "left";
+  if (Math.abs(position.x - bounds.maxX) <= threshold) return "right";
+  return null;
+}
+
+/** Whether `value` is one of the edges this module knows about. */
+export function isPeekEdge(value: unknown): value is PeekEdge {
+  return value === "bottom" || value === "left" || value === "right";
+}
+
+/**
+ * The resting cell position for a pet hanging off `edge`.
+ *
+ * The cell itself stays inside the screen at the edge's margin; `peekShift`
+ * then moves the *art* past the edge. Keeping the two apart is what lets the
+ * position survive a viewport change (a clamped cell is still a valid cell)
+ * while the offset stays a pure function of the edge.
+ *
+ * `position` must already be clamped to the bounds. Side edges keep the
+ * along-the-edge coordinate the user chose; the bottom edge keeps the x.
+ * `null` (no snap) returns the position untouched, so the drop handler can use
+ * one expression for both outcomes.
+ *
+ * `"worklet"` because the drop handler runs on the UI thread.
+ */
+export function snapToPeekEdge(
+  edge: PeekEdge | null,
+  position: { readonly x: number; readonly y: number },
+  bounds: {
+    readonly minX: number;
+    readonly maxX: number;
+    readonly minY: number;
+    readonly maxY: number;
+  },
+): { readonly x: number; readonly y: number } {
+  "worklet";
+  if (edge === "left") return { x: bounds.minX, y: position.y };
+  if (edge === "right") return { x: bounds.maxX, y: position.y };
+  if (edge === "bottom") return { x: position.x, y: bounds.maxY };
+  return position;
+}
 
 /** The standees `computeState` may return for a quiet pet. */
 const IDLE_SERIES_POSES: readonly string[] = ["idle-cute", "afk", "sleep"];
@@ -180,7 +430,10 @@ export const TOOL_POSE_RULES: readonly ToolPoseRule[] = [
   { pattern: /task|agent|spawn|subagent|orchestr/i, pose: "work-boss" },
   { pattern: /slack|message|notify|comment|chat/i, pose: "work-slack" },
   { pattern: /sleep|wait|background|timeout|delay|cron|schedule/i, pose: "work-sleep" },
-  { pattern: /bash|shell|exec|command|terminal|npm|pnpm|yarn|git|node|python/i, pose: "work-slack-phone" },
+  {
+    pattern: /bash|shell|exec|command|terminal|npm|pnpm|yarn|git|node|python/i,
+    pose: "work-slack-phone",
+  },
 ];
 
 /**
@@ -193,8 +446,15 @@ export const TOOL_POSE_RULES: readonly ToolPoseRule[] = [
  * tool kinds.
  */
 export const COMMAND_POSE_RULES: readonly ToolPoseRule[] = [
-  { pattern: /\b(?:git\s+push|git\s+tag\s+-d|deploy|deployment|publish|release|ship)\b/i, pose: "work-deploy" },
-  { pattern: /\b(?:clean|lint|linting|format|fmt|prettier|eslint|stylelint|clang-format|goimports)\b/i, pose: "sweep" },
+  {
+    pattern: /\b(?:git\s+push|git\s+tag\s+-d|deploy|deployment|publish|release|ship)\b/i,
+    pose: "work-deploy",
+  },
+  {
+    pattern:
+      /\b(?:clean|lint|linting|format|fmt|prettier|eslint|stylelint|clang-format|goimports)\b/i,
+    pose: "sweep",
+  },
 ];
 
 /**
@@ -362,12 +622,16 @@ export function pickPatPose(isWorking: boolean, rng: () => number = Math.random)
 
 export function pickRandomMemePose(rng: () => number = Math.random): PoseName {
   const index = Math.floor(rng() * RANDOM_MEME_POSES.length);
-  return RANDOM_MEME_POSES[Math.min(RANDOM_MEME_POSES.length - 1, Math.max(0, index))] ?? "meme-yes";
+  return (
+    RANDOM_MEME_POSES[Math.min(RANDOM_MEME_POSES.length - 1, Math.max(0, index))] ?? "meme-yes"
+  );
 }
 
 export function pickIdleRandomPose(rng: () => number = Math.random): PoseName {
   const index = Math.floor(rng() * IDLE_RANDOM_POSES.length);
-  return IDLE_RANDOM_POSES[Math.min(IDLE_RANDOM_POSES.length - 1, Math.max(0, index))] ?? "daily-coffee";
+  return (
+    IDLE_RANDOM_POSES[Math.min(IDLE_RANDOM_POSES.length - 1, Math.max(0, index))] ?? "daily-coffee"
+  );
 }
 
 export function celebrationPose(completed: number, allDone: boolean): PoseName {
@@ -432,9 +696,7 @@ export function resolveOverlayPose(context: OverlayPoseContext): PoseName {
   const tool = context.tool;
   const recentTool = context.recentTool;
   const recentToolPose =
-    recentTool !== null &&
-    recentTool.pose !== null &&
-    now - recentTool.at <= TOOL_POSE_WINDOW_MS
+    recentTool !== null && recentTool.pose !== null && now - recentTool.at <= TOOL_POSE_WINDOW_MS
       ? recentTool.pose
       : null;
 
@@ -453,10 +715,7 @@ export function resolveOverlayPose(context: OverlayPoseContext): PoseName {
   if (context.celebration !== null && now - context.celebration.at <= CELEBRATION_WINDOW_MS) {
     return context.celebration.pose;
   }
-  if (
-    context.idleRandom !== null &&
-    now - context.idleRandom.pickedAt <= IDLE_RANDOM_HOLD_MS
-  ) {
+  if (context.idleRandom !== null && now - context.idleRandom.pickedAt <= IDLE_RANDOM_HOLD_MS) {
     return context.idleRandom.pose;
   }
 

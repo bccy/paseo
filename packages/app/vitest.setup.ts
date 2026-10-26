@@ -6,6 +6,18 @@ const globalWithTestShims = globalThis as typeof globalThis & Record<string, unk
 
 globalWithTestShims.__DEV__ = false;
 
+/**
+ * `pose-map.ts` builds the pet standee table with `require("...webp")`.
+ * Vite's `assetsInclude` only covers static ESM imports: a CJS `require` inside
+ * an SSR-transformed module goes through Node's own loader, which parses the
+ * image bytes as JavaScript and throws "Invalid or unexpected token". Teach the
+ * worker's loader the extension so anything importing that table can be tested.
+ * The module only needs a truthy, distinguishable value per pose.
+ */
+require.extensions[".webp"] = (module: { exports: unknown }, filename: string) => {
+  module.exports = filename;
+};
+
 // JSDOM has no CSS media-query engine. Give native-web libraries the browser API
 // with no active preferences; responsive behavior is exercised in Chromium.
 if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {

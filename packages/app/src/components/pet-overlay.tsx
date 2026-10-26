@@ -93,17 +93,27 @@ import {
   IDLE_RANDOM_MIN_MS,
   KEYWORD_POSES,
   PAT_HOLD_MS,
+  PEEK_POSES,
   PICK_UP_HOLD_MS,
   POSE_ASSETS,
   celebrationPose,
+  clampToBounds,
   isIdleSeriesPose,
+  parseStoredPosition,
+  peekShift,
+  peekSnapThreshold,
   pickIdleRandomPose,
   pickRandomMemePose,
   nextPatPose,
   resolveOverlayPose,
+  resolvePeekEdge,
   resolveToolPose,
+  settleCancelledDrag,
+  snapToPeekEdge,
   WORKING_PAT_POSE,
+  type PeekEdge,
   type PoseName,
+  type StoredPetPosition,
 } from "../pets/pose-map";
 import { insertLatestPhotoIntoDraft } from "../pets/pet-latest-photo";
 import {
@@ -140,13 +150,17 @@ interface MachineSnapshot {
 }
 
 /** On-screen size of the standee, in points. Deliberately smaller than upstream. */
-const PET_SIZE = 96;
+const PET_SIZE = 76;
 /** Source pixels per point, used to rescale the upstream pixel amounts. */
 const ART_TO_SCREEN = PET_SIZE / 512;
 
 const STORAGE_KEY = "paseo.pet.position.v1";
 /** Keep the pet clear of the very edge so nothing is clipped by the window. */
 const EDGE_MARGIN = 10;
+/** How far from an edge a drop counts as "hang her there", in points. */
+const PEEK_SNAP_PX = peekSnapThreshold(PET_SIZE);
+/** Shared by the position and the peek shift so both settle at the same rate. */
+const SETTLE_SPRING = { damping: 18, stiffness: 180 } as const;
 /**
  * Vertical space reserved at the bottom for the composer. The pet must never
  * rest below the input bar: when the keyboard opens the bar rises with it, and
@@ -192,11 +206,6 @@ const TICK_MS = 500;
  * hydration on launch), so it must not trigger a keyword / meme reaction.
  */
 const KEYWORD_TRIGGER_MAX_AGE_MS = 5 * 60 * 1000;
-
-interface StoredPosition {
-  x: number;
-  y: number;
-}
 
 /** How much of the most recent todo list is done, and whose list it is. */
 interface TodoTally {
@@ -637,10 +646,7 @@ export function PetOverlay() {
     if (previous === null || previous.agentId !== todoTally.agentId) return;
     if (todoTally.completed <= previous.completed) return;
     celebrationRef.current = {
-      pose: celebrationPose(
-        todoTally.completed,
-        todoTally.completed >= todoTally.total,
-      ),
+      pose: celebrationPose(todoTally.completed, todoTally.completed >= todoTally.total),
       at: Date.now(),
     };
     idleRandomRef.current = null;
@@ -669,10 +675,7 @@ export function PetOverlay() {
   // Tool activity is not a user message, but it does mean "not idle".
   useEffect(() => {
     if (activity.recentToolAt <= 0) return;
-    lastStreamActivityRef.current = Math.max(
-      lastStreamActivityRef.current,
-      activity.recentToolAt,
-    );
+    lastStreamActivityRef.current = Math.max(lastStreamActivityRef.current, activity.recentToolAt);
     idleRandomRef.current = null;
   }, [activity.recentToolAt]);
 
@@ -789,6 +792,15 @@ export function PetOverlay() {
   const pressScale = useSharedValue(1);
   const originX = useSharedValue(0);
   const originY = useSharedValue(0);
+  // Extra offset applied on top of `x`/`y` while she hangs off an edge. Kept as
+  // its own pair of shared values so the *stored* position stays the plain
+  // resting cell: leaving the edge only animates these back to zero instead of
+  // having to un-bake a shift out of the saved coordinates.
+  const shiftX = useSharedValue(0);
+  const shiftY = useSharedValue(0);
+  // 0 while full-body, 1 while peeking. Dampens the idle loops (see `petStyle`):
+  // a ledge that breathes and tilts stops looking attached to the composer.
+  const peekWeight = useSharedValue(0);
 
   // The composer owns the bottom of the screen and rises with the keyboard.
   // Track the keyboard so the pet can be clamped above the input bar instead of
@@ -811,10 +823,7 @@ export function PetOverlay() {
   const minX = EDGE_MARGIN;
   const maxX = Math.max(EDGE_MARGIN, width - PET_SIZE - EDGE_MARGIN);
   const minY = topInset + EDGE_MARGIN;
-  const maxY = Math.max(
-    minY,
-    height - PET_SIZE - EDGE_MARGIN - COMPOSER_GUARD - keyboardHeight,
-  );
+  const maxY = Math.max(minY, height - PET_SIZE - EDGE_MARGIN - COMPOSER_GUARD - keyboardHeight);
 
   // Upstream soft set: wm-breathe (-4px over 3.4s) and wm-sway (0 -> 1.2deg / 6s).
   useEffect(() => {
@@ -840,6 +849,46 @@ export function PetOverlay() {
     poseIn.value = withTiming(1, { duration: 260, easing: Easing.out(Easing.quad) });
   }, [petPose, poseIn]);
 
+  const persist = useCallback((nextX: number, nextY: number, edge: PeekEdge | null) => {
+    // A full-body position is written without the field at all, so a build from
+    // before the edge feature reads the same record unchanged.
+    const stored: StoredPetPosition =
+      edge === null ? { x: nextX, y: nextY, edge: null } : { x: nextX, y: nextY, edge };
+    void AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(stored)).catch(() => {
+      // Persisting a pet position is best-effort: a failure only costs the
+      // position on the next launch.
+    });
+  }, []);
+
+  /**
+   * The peek edge as React state, for the standee the renderer draws.
+   *
+   * The animation side of the snap lives in shared values; this mirror exists
+   * only because picking the art is a React render, not a style. A drag clears
+   * it immediately (a lifted pet is full-body), and the drop sets it again.
+   */
+  const [peekEdge, setPeekEdge] = useState<PeekEdge | null>(null);
+  /** Mirror of `peekEdge` for the layout effect, which must not depend on it. */
+  const peekEdgeRef = useRef<PeekEdge | null>(null);
+  peekEdgeRef.current = peekEdge;
+  const clearPeek = useCallback(() => setPeekEdge(null), []);
+
+  /** Move the cell + art to `edge`'s resting position, without a drag. */
+  const applyPeek = useCallback(
+    (edge: PeekEdge | null, nextX: number, nextY: number) => {
+      const shift = peekShift(edge, PET_SIZE, EDGE_MARGIN);
+      shiftX.value = shift.x;
+      shiftY.value = shift.y;
+      peekWeight.value = edge === null ? 0 : 1;
+      x.value = nextX;
+      y.value = nextY;
+      setPeekEdge(edge);
+    },
+    // Shared values are stable identities.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
   // Restore the stored position once on mount.
   const restored = useRef(false);
   useEffect(() => {
@@ -849,10 +898,12 @@ export function PetOverlay() {
     void AsyncStorage.getItem(STORAGE_KEY)
       .then((raw) => {
         if (cancelled || raw === null) return;
-        const parsed = JSON.parse(raw) as StoredPosition;
-        if (typeof parsed.x !== "number" || typeof parsed.y !== "number") return;
-        x.value = Math.min(Math.max(minX, parsed.x), maxX);
-        y.value = Math.min(Math.max(minY, parsed.y), maxY);
+        // Parsing lives in `pose-map` so the upgrade path (a record written
+        // before the edge feature existed) is covered by its own tests.
+        const stored = parseStoredPosition(raw);
+        if (stored === null) return;
+        const resting = clampToBounds(stored, { minX, maxX, minY, maxY });
+        applyPeek(stored.edge, resting.x, resting.y);
       })
       .catch(() => {
         // Unreadable storage just leaves the pet at its default corner.
@@ -886,15 +937,23 @@ export function PetOverlay() {
     } else {
       y.value = Math.min(Math.max(minY, y.value), maxY);
     }
+    // A peeked pet has to follow the composer: when the keyboard lifts `maxY`
+    // the ledge rises with it, and the cell has to re-snap or the art would be
+    // left hanging in mid-air. `peekShift` is viewport-independent, so only the
+    // cell moves.
+    //
+    // The edge is read through a ref, not a dependency: `setPeekEdge` runs at
+    // the end of a drop, and re-running this effect on that state change would
+    // assign `x`/`y` directly and cancel the settle spring that is still
+    // animating them.
+    const edge = peekEdgeRef.current;
+    if (edge !== null) {
+      const resting = snapToPeekEdge(edge, { x: x.value, y: y.value }, { minX, maxX, minY, maxY });
+      x.value = resting.x;
+      y.value = resting.y;
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [minX, maxX, minY, maxY, height, keyboardHeight]);
-
-  const persist = useCallback((nextX: number, nextY: number) => {
-    void AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ x: nextX, y: nextY })).catch(() => {
-      // Persisting a pet position is best-effort: a failure only costs the
-      // position on the next launch.
-    });
-  }, []);
 
   /** Play wm-hop once. */
   const playHop = useCallback(() => {
@@ -967,15 +1026,12 @@ export function PetOverlay() {
 
   const closeCommandMenu = useCallback(() => setCommandMenuVisible(false), []);
 
-  const selectSlashCommand = useCallback(
-    (command: PetSlashCommand) => {
-      setCommandMenuVisible(false);
-      const draftKey = focusedDraftKeyRef.current;
-      if (draftKey === null) return;
-      useDraftStore.getState().requestTextInsert({ draftKey, text: command.insert });
-    },
-    [],
-  );
+  const selectSlashCommand = useCallback((command: PetSlashCommand) => {
+    setCommandMenuVisible(false);
+    const draftKey = focusedDraftKeyRef.current;
+    if (draftKey === null) return;
+    useDraftStore.getState().requestTextInsert({ draftKey, text: command.insert });
+  }, []);
 
   const handleTapEnd = useCallback(() => {
     tapBurstCountRef.current += 1;
@@ -1018,10 +1074,21 @@ export function PetOverlay() {
     () =>
       Gesture.Pan()
         .onStart(() => {
+          // Fold the peek offset into the cell before tracking the finger. The
+          // art is drawn at `x + shiftX`, so moving the same amount from one to
+          // the other leaves it exactly where the user grabbed it — without
+          // this the standee would jump by the offset the moment the drag
+          // starts, because a dragged pet is always full-body.
+          x.value = x.value + shiftX.value;
+          y.value = y.value + shiftY.value;
+          shiftX.value = 0;
+          shiftY.value = 0;
+          peekWeight.value = 0;
           originX.value = x.value;
           originY.value = y.value;
           pressScale.value = withSpring(1.08, { damping: 20, stiffness: 220 });
           runOnJS(dragStarted)();
+          runOnJS(clearPeek)();
         })
         .onUpdate((event) => {
           x.value = originX.value + event.translationX;
@@ -1030,17 +1097,38 @@ export function PetOverlay() {
         .onEnd(() => {
           const settledX = Math.min(Math.max(minX, x.value), maxX);
           const settledY = Math.min(Math.max(minY, y.value), maxY);
-          x.value = withSpring(settledX, { damping: 18, stiffness: 180 });
-          y.value = withSpring(settledY, { damping: 18, stiffness: 180 });
-          runOnJS(persist)(settledX, settledY);
+          const bounds = { minX, maxX, minY, maxY };
+          const edge = resolvePeekEdge({ x: settledX, y: settledY }, bounds, PEEK_SNAP_PX);
+          const resting = snapToPeekEdge(edge, { x: settledX, y: settledY }, bounds);
+          const shift = peekShift(edge, PET_SIZE, EDGE_MARGIN);
+          x.value = withSpring(resting.x, SETTLE_SPRING);
+          y.value = withSpring(resting.y, SETTLE_SPRING);
+          shiftX.value = withSpring(shift.x, SETTLE_SPRING);
+          shiftY.value = withSpring(shift.y, SETTLE_SPRING);
+          peekWeight.value = withTiming(edge === null ? 0 : 1, { duration: 180 });
+          runOnJS(persist)(resting.x, resting.y, edge);
+          runOnJS(setPeekEdge)(edge);
         })
         .onFinalize(() => {
           pressScale.value = withSpring(1, { damping: 20, stiffness: 220 });
+          // A cancelled pan never reaches `onEnd`, so nothing has clamped the
+          // cell yet: `onStart` folded the peek offset in, which leaves e.g. a
+          // left peek at x = -20.75 — outside the bounds — and the peek state
+          // was already cleared, so it would stay there. `onEnd` has normally
+          // already settled it; re-clamping is a no-op in that case.
+          const resting = settleCancelledDrag({ x: x.value, y: y.value }, peekEdgeRef.current, {
+            minX,
+            maxX,
+            minY,
+            maxY,
+          });
+          x.value = withSpring(resting.x, SETTLE_SPRING);
+          y.value = withSpring(resting.y, SETTLE_SPRING);
           runOnJS(dragEnded)();
         }),
     // Shared values are stable identities; this closure only reads and writes them.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [minX, maxX, minY, maxY, persist, dragStarted, dragEnded],
+    [minX, maxX, minY, maxY, persist, dragStarted, dragEnded, clearPeek],
   );
 
   // Long press opens the slash-command menu. `Exclusive` gives it priority over
@@ -1070,23 +1158,41 @@ export function PetOverlay() {
   // Priority: long press -> drag -> tap. A drag must not be mistaken for a tap.
   const gesture = useMemo(() => Gesture.Exclusive(longPress, pan, tap), [longPress, pan, tap]);
 
-  const petStyle = useAnimatedStyle(() => ({
-    opacity: 0.2 + 0.8 * poseIn.value,
-    transform: [
-      { translateX: x.value },
-      {
-        translateY:
-          y.value - breathe.value * BREATHE_PX - hop.value * HOP_PX + (1 - poseIn.value) * POSE_IN_PX,
-      },
-      { rotate: `${sway.value * 1.2}deg` },
-      { scale: pressScale.value * (1 + (1 - poseIn.value) * 0.04) },
-    ],
-  }));
+  const petStyle = useAnimatedStyle(() => {
+    // The idle loops are damped while she hangs off an edge: a ledge that
+    // breathes and tilts stops reading as attached to the composer bar. The
+    // hop stays at full strength so pats still answer from a peek.
+    const idle = 1 - peekWeight.value;
+    return {
+      opacity: 0.2 + 0.8 * poseIn.value,
+      transform: [
+        { translateX: x.value + shiftX.value },
+        {
+          translateY:
+            y.value +
+            shiftY.value -
+            breathe.value * BREATHE_PX * idle -
+            hop.value * HOP_PX +
+            (1 - poseIn.value) * POSE_IN_PX,
+        },
+        { rotate: `${sway.value * 1.2 * idle}deg` },
+        { scale: pressScale.value * (1 + (1 - poseIn.value) * 0.04) },
+      ],
+    };
+  });
 
   // State -> pose -> standee. `computeState` (and the trigger layer) produce an
   // upstream pose name; `POSE_ASSETS` maps it to one of the 79 standees. This
   // link is the product: different states must look different.
-  const standee = POSE_ASSETS[petPose] ?? POSE_ASSETS["idle-cute"];
+  //
+  // A pet hanging off an edge draws its peek standee instead. The peek family
+  // is a separate art set, not a state pose: `resolveOverlayPose` keeps running
+  // underneath (so leaving the edge lands on the pose the state machine wanted
+  // all along) and this only decides what is drawn.
+  const standee =
+    peekEdge === null
+      ? (POSE_ASSETS[petPose] ?? POSE_ASSETS["idle-cute"])
+      : POSE_ASSETS[PEEK_POSES[peekEdge]];
 
   if (HIDDEN_ROUTES.has(pathname)) return null;
 
