@@ -757,6 +757,88 @@ test("refreshing an agent replaces the injected timeline store instead of append
   }
 });
 
+test("a history replay keeps each row's turn id", async () => {
+  // Paseo 0.14 folds finished turns by `turnId`, and a reopened conversation is
+  // read back through the timeline store (`fetch_agent_timeline` returns
+  // `entry.turnId`). Replay used to drop it: `historyEvents` carry the id
+  // (`{...event, item}`) but `recordTimeline` was called with only a timestamp,
+  // so every restored row had no turn and the client fell back to "each user
+  // message starts a turn" — which cannot recover a prompt split across rows.
+  // Every provider replays through here, so this is not provider-specific.
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-turn-id-replay-"));
+  const store = new RecordingTimelineStore();
+  class HistorySession extends TestAgentSession {
+    override async *streamHistory(): AsyncGenerator<AgentStreamEvent> {
+      yield {
+        type: "timeline",
+        provider: "codex",
+        turnId: "turn-1",
+        item: { type: "user_message", text: "first" },
+      };
+      yield {
+        type: "timeline",
+        provider: "codex",
+        turnId: "turn-1",
+        item: { type: "assistant_message", text: "first reply" },
+      };
+      yield {
+        type: "timeline",
+        provider: "codex",
+        turnId: "turn-2",
+        item: { type: "user_message", text: "second" },
+      };
+      // A row the provider could not attribute must stay unattributed rather
+      // than inherit a neighbouring turn.
+      yield {
+        type: "timeline",
+        provider: "codex",
+        item: { type: "assistant_message", text: "unattributed" },
+      };
+    }
+  }
+  class HistoryClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new HistorySession(config);
+    }
+
+    override async resumeSession(
+      _handle: AgentPersistenceHandle,
+      config?: Partial<AgentSessionConfig>,
+    ): Promise<AgentSession> {
+      return new HistorySession({ provider: "codex", cwd: config?.cwd ?? workdir });
+    }
+  }
+  const manager = new AgentManager({
+    clients: { codex: new HistoryClient() },
+    durableTimelineStore: store,
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    // What `session.handleRefreshAgentRequest` does for a loaded agent: the
+    // refresh path re-reads the provider's history through the durable store.
+    await manager.reloadAgentSession(agent.id, undefined, { rehydrateFromDisk: true });
+    await manager.hydrateTimelineFromProvider(agent.id, { broadcast: true });
+    await manager.flush();
+
+    const rows = await manager.getTimelineRows(agent.id);
+    expect(rows.map((row) => [row.item.type, row.turnId])).toEqual([
+      ["user_message", "turn-1"],
+      ["assistant_message", "turn-1"],
+      ["user_message", "turn-2"],
+      ["assistant_message", undefined],
+    ]);
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("a failed history replay leaves the committed timeline intact", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-timeline-replay-fail-"));
   const store = new RecordingTimelineStore();
