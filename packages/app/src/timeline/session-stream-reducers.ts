@@ -1615,24 +1615,17 @@ export function processAgentStreamEvent(
         unmatchedUserMessageInsert: "head",
       });
     } else {
-      // Keep streamable items in the head lane while no cursor exists. Passing the head as
-      // `tail` with an empty `head` starts a fresh item on every delta (one thought row per
-      // reasoning chunk, see #7500); with an empty tail every head-lane merge still works.
-      // Non-streamable and completion events flush the head into `overlay.tail`, so the
-      // concatenation below keeps the same observable order without touching the real tail.
-      const overlay = applyStreamEvent({
-        tail: [],
-        head: currentHead,
-        event,
-        timestamp,
+      // Before history arrives, the overlay is one ordered stream. Reducing it
+      // directly keeps consecutive reasoning chunks in the same row.
+      const overlay = reduceStreamUpdate(currentHead, event, timestamp, {
         source: "live",
         timelineCursor,
       });
       streamResult = {
         tail: currentTail,
-        head: [...overlay.tail, ...overlay.head],
+        head: overlay,
         changedTail: false,
-        changedHead: overlay.changedTail || overlay.changedHead,
+        changedHead: overlay !== currentHead,
       };
     }
   } else {
