@@ -9,6 +9,8 @@ import {
   parseStoredPosition,
   peekShift,
   peekSnapThreshold,
+  resolveDragDropEdge,
+  resolveDropEdge,
   resolvePeekEdge,
   settleCancelledDrag,
   snapToPeekEdge,
@@ -158,6 +160,116 @@ describe("snapToPeekEdge", () => {
   it("returns the position untouched when nothing was snapped", () => {
     const position = { x: 100, y: 200 };
     expect(snapToPeekEdge(null, position, bounds)).toEqual(position);
+  });
+});
+
+describe("resolveDropEdge", () => {
+  const bounds = { minX: 10, maxX: 304, minY: 57, maxY: 694 };
+  const threshold = THRESHOLD_PT;
+
+  // A drag tracks the finger without clamping, so aiming at an edge overshoots
+  // it. Feeding the raw point to the distance test made the snap *less* likely
+  // the harder the user flicked — the harder they aimed, the more it overshot.
+  it("snaps when the drop overshoots the edge", () => {
+    expect(resolveDropEdge({ x: bounds.minX - 40, y: 400 }, bounds, threshold)).toBe("left");
+    expect(resolveDropEdge({ x: bounds.maxX + 40, y: 400 }, bounds, threshold)).toBe("right");
+    expect(resolveDropEdge({ x: 150, y: bounds.maxY + 40 }, bounds, threshold)).toBe("bottom");
+  });
+
+  it("still snaps exactly on the edge and inside the zone", () => {
+    expect(resolveDropEdge({ x: bounds.minX, y: 400 }, bounds, threshold)).toBe("left");
+    expect(resolveDropEdge({ x: bounds.minX + 5, y: 400 }, bounds, threshold)).toBe("left");
+  });
+
+  it("stays free when the drop is past the zone and inside the screen", () => {
+    expect(resolveDropEdge({ x: 150, y: 400 }, bounds, threshold)).toBeNull();
+    expect(
+      resolveDropEdge({ x: bounds.minX + threshold + 1, y: 400 }, bounds, threshold),
+    ).toBeNull();
+  });
+
+  it("keeps the bottom priority when a corner overshoots", () => {
+    expect(resolveDropEdge({ x: bounds.minX - 40, y: bounds.maxY + 40 }, bounds, threshold)).toBe(
+      "bottom",
+    );
+  });
+});
+
+describe("resolveDragDropEdge", () => {
+  const bounds = { minX: 10, maxX: 304, minY: 57, maxY: 694 };
+  const threshold = THRESHOLD_PT;
+  const base = { translationX: 0, translationY: 0, bounds, threshold };
+
+  it("judges a drag that started free by its drop point", () => {
+    expect(resolveDragDropEdge({ ...base, startedOn: null, position: { x: -40, y: 400 } })).toBe(
+      "left",
+    );
+    expect(
+      resolveDragDropEdge({ ...base, startedOn: null, position: { x: 150, y: 400 } }),
+    ).toBeNull();
+  });
+
+  it("releases an edge once the pull clears the threshold", () => {
+    // Away from a left edge is +x.
+    expect(
+      resolveDragDropEdge({
+        ...base,
+        startedOn: "left",
+        translationX: threshold,
+        position: { x: -20.75, y: 400 },
+      }),
+    ).toBeNull();
+    // Away from a right edge is -x, so a positive drag is *towards* it.
+    expect(
+      resolveDragDropEdge({
+        ...base,
+        startedOn: "right",
+        translationX: -threshold,
+        position: { x: 340, y: 400 },
+      }),
+    ).toBeNull();
+    // Away from the bottom is -y.
+    expect(
+      resolveDragDropEdge({
+        ...base,
+        startedOn: "bottom",
+        translationY: -threshold,
+        position: { x: 150, y: 760 },
+      }),
+    ).toBeNull();
+  });
+
+  it("returns to the same edge when the pull is short", () => {
+    // Just under the threshold, and a pull in the wrong direction, both keep her.
+    expect(
+      resolveDragDropEdge({
+        ...base,
+        startedOn: "left",
+        translationX: threshold - 1,
+        position: { x: -20.75, y: 400 },
+      }),
+    ).toBe("left");
+    expect(
+      resolveDragDropEdge({
+        ...base,
+        startedOn: "left",
+        translationX: -threshold,
+        position: { x: -40, y: 400 },
+      }),
+    ).toBe("left");
+  });
+
+  it("does not consult the drop point when the drag started on an edge", () => {
+    // The folded offset puts the cell far outside the bounds; reading that as a
+    // position is exactly the bug that made her jump to another edge.
+    expect(
+      resolveDragDropEdge({
+        ...base,
+        startedOn: "left",
+        translationX: 0,
+        position: { x: 150, y: 400 },
+      }),
+    ).toBe("left");
   });
 });
 

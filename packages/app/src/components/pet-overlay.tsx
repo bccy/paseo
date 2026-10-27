@@ -107,7 +107,7 @@ import {
   pickRandomMemePose,
   nextPatPose,
   resolveOverlayPose,
-  resolvePeekEdge,
+  resolveDragDropEdge,
   resolveToolPose,
   settleCancelledDrag,
   snapToPeekEdge,
@@ -805,6 +805,15 @@ export function PetOverlay() {
   const peekWeight = useSharedValue(0);
   /** Which edge the drag started from, so the drop handler can tell a pull-away from a nudge. */
   const dragStartEdge = useSharedValue<"left" | "right" | "bottom" | null>(null);
+  /**
+   * Whether `onEnd` already placed the cell.
+   *
+   * `onFinalize` runs after `onEnd` on every gesture, cancelled or not, and it
+   * reads `x`/`y` — which a spring assignment has already reset to its *start*
+   * value. Settling again from there overwrites the snapped target, leaving the
+   * standee up to a threshold away from the edge it just attached to.
+   */
+  const dragSettled = useSharedValue(false);
 
   // The composer owns the bottom of the screen and rises with the keyboard.
   // Track the keyboard so the pet can be clamped above the input bar instead of
@@ -822,14 +831,19 @@ export function PetOverlay() {
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   useEffect(() => {
     const show = Keyboard.addListener("keyboardWillShow", (event) => {
-      setKeyboardHeight(event.endCoordinates.height + keyboardClearance);
+      // The composer rises by `rawHeight - bottomInset`, not by the whole
+      // `endCoordinates.height`: `KeyboardTranslateView` adds the bottom safe area
+      // back on top of the (negative) keyboard height, so the net lift stops at the
+      // home indicator. Subtracting it here is what keeps a bottom peek welded to
+      // the input bar instead of floating one safe-area above it.
+      setKeyboardHeight(event.endCoordinates.height - bottomInset + keyboardClearance);
     });
     const hide = Keyboard.addListener("keyboardWillHide", () => setKeyboardHeight(0));
     return () => {
       show.remove();
       hide.remove();
     };
-  }, [keyboardClearance]);
+  }, [bottomInset, keyboardClearance]);
   const preKeyboardYRef = useRef<number | null>(null);
 
   const minX = EDGE_MARGIN;
@@ -891,6 +905,19 @@ export function PetOverlay() {
   /** Mirror of `peekEdge` for the layout effect, which must not depend on it. */
   const peekEdgeRef = useRef<PeekEdge | null>(null);
   peekEdgeRef.current = peekEdge;
+  /**
+   * The edge, in a form the gesture worklets can actually read.
+   *
+   * A plain ref does not work here: worklets capture a *clone* of whatever they
+   * close over, so the UI thread keeps the `.current` it saw when the handler was
+   * first serialised — which is `null`, before any drop. Writing the ref later
+   * never reaches it, which silently killed every branch that asked "did this
+   * drag start on an edge".
+   */
+  const peekEdgeShared = useSharedValue<PeekEdge | null>(null);
+  useEffect(() => {
+    peekEdgeShared.value = peekEdge;
+  }, [peekEdge, peekEdgeShared]);
   const clearPeek = useCallback(() => setPeekEdge(null), []);
 
   /** Move the cell + art to `edge`'s resting position, without a drag. */
@@ -1110,7 +1137,8 @@ export function PetOverlay() {
           originX.value = x.value;
           originY.value = y.value;
           pressScale.value = withSpring(1.08, { damping: 20, stiffness: 220 });
-          dragStartEdge.value = peekEdgeRef.current;
+          dragStartEdge.value = peekEdgeShared.value;
+          dragSettled.value = false;
           runOnJS(dragStarted)();
           runOnJS(clearPeek)();
         })
@@ -1122,31 +1150,27 @@ export function PetOverlay() {
           const bounds = { minX, maxX, minY, maxY };
           // A drag that starts on a peek edge is measured by how far it moved away
           // from that edge, not by where the clamped cell ended up. `onStart` folds
-          // the peek offset into `x`, so a left peek begins the drag at x = -20.75 —
-          // 30.75pt outside `minX`. Judging the absolute position there means the
-          // user must pull 50pt before the threshold is met, which is what made the
-          // pet feel stuck to the edge. Pulling `PEEK_SNAP_PX` away releases it.
+          // the peek offset into `x`, so a left peek begins the drag at x = -23.2 —
+          // 33.2pt outside `minX`. Judging the absolute position there means the
+          // user must pull that far before the threshold is met, which is what made
+          // the pet feel stuck to the edge. Pulling `PEEK_SNAP_PX` away releases it.
           const startedOn = dragStartEdge.value;
-          const pulled =
-            startedOn === "left"
-              ? event.translationX
-              : startedOn === "right"
-                ? -event.translationX
-                : startedOn === "bottom"
-                  ? -event.translationY
-                  : 0;
           dragStartEdge.value = null;
           // A drag that began on an edge decides between "back to that same edge"
           // and "free": re-running the position test here would read the folded
           // offset (`x` starts 30.75pt outside `minX`), fail the side check and
           // report some other edge — which is what made the standee teleport.
-          const edge =
-            startedOn === null
-              ? resolvePeekEdge({ x: x.value, y: y.value }, bounds, PEEK_SNAP_PX)
-              : pulled >= PEEK_SNAP_PX
-                ? null
-                : startedOn;
-          const snapped = snapToPeekEdge(edge, { x: x.value, y: y.value }, bounds);
+          const droppedX = Math.min(Math.max(minX, x.value), maxX);
+          const droppedY = Math.min(Math.max(minY, y.value), maxY);
+          const edge = resolveDragDropEdge({
+            startedOn,
+            translationX: event.translationX,
+            translationY: event.translationY,
+            position: { x: x.value, y: y.value },
+            bounds,
+            threshold: PEEK_SNAP_PX,
+          });
+          const snapped = snapToPeekEdge(edge, { x: droppedX, y: droppedY }, bounds);
           // `snapToPeekEdge` hands the raw point back when no edge matched, so the
           // dropped-at-the-window-border case still has to be clamped. A snapped
           // point is already one of the bounds and passes through unchanged.
@@ -1160,6 +1184,12 @@ export function PetOverlay() {
           shiftX.value = withSpring(shift.x, SETTLE_SPRING);
           shiftY.value = withSpring(shift.y, SETTLE_SPRING);
           peekWeight.value = withTiming(edge === null ? 0 : 1, { duration: 180 });
+          // Write the shared copy here, on the UI thread, rather than waiting for
+          // the effect that mirrors `peekEdge`: a grab that lands inside the same
+          // frame would otherwise read the previous value and treat this peek as a
+          // free drag, so pulling away would not release it.
+          peekEdgeShared.value = edge;
+          dragSettled.value = true;
           runOnJS(persist)(resting.x, resting.y, edge);
           runOnJS(setPeekEdge)(edge);
         })
@@ -1170,14 +1200,16 @@ export function PetOverlay() {
           // left peek at x = -20.75 — outside the bounds — and the peek state
           // was already cleared, so it would stay there. `onEnd` has normally
           // already settled it; re-clamping is a no-op in that case.
-          const resting = settleCancelledDrag({ x: x.value, y: y.value }, peekEdgeRef.current, {
-            minX,
-            maxX,
-            minY,
-            maxY,
-          });
-          x.value = withSpring(resting.x, SETTLE_SPRING);
-          y.value = withSpring(resting.y, SETTLE_SPRING);
+          if (!dragSettled.value) {
+            const resting = settleCancelledDrag({ x: x.value, y: y.value }, peekEdgeShared.value, {
+              minX,
+              maxX,
+              minY,
+              maxY,
+            });
+            x.value = withSpring(resting.x, SETTLE_SPRING);
+            y.value = withSpring(resting.y, SETTLE_SPRING);
+          }
           runOnJS(dragEnded)();
         }),
     // Shared values are stable identities; this closure only reads and writes them.

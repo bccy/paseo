@@ -169,10 +169,14 @@ export const PEEK_ANCHORS: Readonly<Record<PeekEdge, { x: number; y: number }>> 
  * How close the dropped cell must be to an edge to snap to it, as a fraction of
  * the pet's own size.
  *
- * About a quarter of a body — 20pt at the shipped 76pt standee. The first value
- * tried was half a body (38pt), which on the device meant a peek only let go
- * after a long pull; a quarter is the point where nudging her off the edge
- * releases it, while a dropped-on-the-edge pet still settles back.
+ * Pinned to an absolute 12pt at the shipped 85pt standee rather than tuned as a
+ * ratio, because the two numbers it could track disagree: the side peek artworks
+ * carry 22-24pt of transparent padding per side, so their visible content is
+ * under half the cell. A threshold expressed in body sizes therefore feels about
+ * twice as long to pull as the number suggests.
+ *
+ * History: 38pt (half a body) let go only after a long pull, then 20pt, still
+ * long for the same reason.
  */
 export const PEEK_SNAP_RATIO = 12 / 85;
 
@@ -324,6 +328,72 @@ export function resolvePeekEdge(
   if (Math.abs(position.x - bounds.minX) <= threshold) return "left";
   if (Math.abs(position.x - bounds.maxX) <= threshold) return "right";
   return null;
+}
+
+/**
+ * Which edge a drop should snap to, clamping the raw finger position first.
+ *
+ * `resolvePeekEdge` matches on distance to a bound, so feeding it the raw drag
+ * position punishes overshoot: `onUpdate` tracks the finger without clamping, a
+ * normal flick towards an edge lands past `minX`/`maxY`, and the distance grows
+ * the harder the user flicks — so the more deliberately they aimed at the edge,
+ * the less likely it snapped. Clamping first makes the last few points of travel
+ * irrelevant, which is what the gesture feels like it should do.
+ *
+ * `"worklet"` because the drop handler runs on the UI thread.
+ */
+export function resolveDropEdge(
+  position: { readonly x: number; readonly y: number },
+  bounds: {
+    readonly minX: number;
+    readonly maxX: number;
+    readonly minY: number;
+    readonly maxY: number;
+  },
+  threshold: number,
+): PeekEdge | null {
+  "worklet";
+  const x = Math.min(Math.max(bounds.minX, position.x), bounds.maxX);
+  const y = Math.min(Math.max(bounds.minY, position.y), bounds.maxY);
+  return resolvePeekEdge({ x, y }, bounds, threshold);
+}
+
+/**
+ * Which edge a finished drag settles on.
+ *
+ * A drag behaves differently depending on where she started. Hanging on an edge,
+ * the only question is whether the user pulled her off it — and by how far, which
+ * the raw translation answers. The cell position cannot answer it: `onStart`
+ * folds the peek offset into it, so a side peek begins the drag tens of points
+ * outside the bounds already, and the drop point says nothing about intent.
+ *
+ * Starting free, the drop point is the whole story.
+ *
+ * `"worklet"` because the drop handler runs on the UI thread, and it closes over
+ * nothing, so it stays safe to call from there.
+ */
+export function resolveDragDropEdge(input: {
+  readonly startedOn: PeekEdge | null;
+  readonly translationX: number;
+  readonly translationY: number;
+  readonly position: { readonly x: number; readonly y: number };
+  readonly bounds: {
+    readonly minX: number;
+    readonly maxX: number;
+    readonly minY: number;
+    readonly maxY: number;
+  };
+  readonly threshold: number;
+}): PeekEdge | null {
+  "worklet";
+  const { startedOn, translationX, translationY, position, bounds, threshold } = input;
+  if (startedOn === null) return resolveDropEdge(position, bounds, threshold);
+  // Away from the edge is +x on the left, -x on the right, -y on the bottom.
+  let pulled = 0;
+  if (startedOn === "left") pulled = translationX;
+  else if (startedOn === "right") pulled = -translationX;
+  else pulled = -translationY;
+  return pulled >= threshold ? null : startedOn;
 }
 
 /** Whether `value` is one of the edges this module knows about. */
