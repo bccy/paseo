@@ -7,6 +7,8 @@ import {
   clampToBounds,
   isPeekEdge,
   parseStoredPosition,
+  BOTTOM_PEEK_SCALE,
+  peekCellSize,
   peekShift,
   peekSnapThreshold,
   resolveDragDropEdge,
@@ -125,9 +127,37 @@ describe("peekShift", () => {
 
   it("moves the bottom peek past the bottom edge", () => {
     const shift = peekShift("bottom", SIZE, EDGE_MARGIN);
-    expect(shift.y).toBeCloseTo(SIZE * (1 - MEASURED.bottom.y) + EDGE_MARGIN, 6);
+    // The bottom peek is drawn smaller than the cell (BOTTOM_PEEK_SCALE), and a
+    // centred scale lifts the crop line, so the shift carries that back down.
+    // Written out from measured numbers rather than from the helper it tests.
+    const compensation = (1 - BOTTOM_PEEK_SCALE) * (MEASURED.bottom.y - 0.5) * SIZE;
+    expect(shift.y).toBeCloseTo(SIZE * (1 - MEASURED.bottom.y) + EDGE_MARGIN + compensation, 6);
     expect(shift.y).toBeGreaterThan(0);
     expect(shift.x).toBe(0);
+  });
+
+  it("keeps the scaled bottom crop line on the cell's unscaled anchor", () => {
+    // Independent geometry check: where the crop line lands inside the cell after
+    // scaling + compensation must equal where it lands with no scaling at all.
+    const scaled = SIZE * BOTTOM_PEEK_SCALE;
+    const drawnTopInsideCell = (SIZE - scaled) / 2;
+    const cropLineBeforeShift = drawnTopInsideCell + MEASURED.bottom.y * scaled;
+    const shift = peekShift("bottom", SIZE, EDGE_MARGIN);
+    const cropLineAfterShift = cropLineBeforeShift + shift.y;
+    // With no scaling the crop line sits at `anchor * SIZE` inside the cell, and
+    // the shift moves it to `SIZE + EDGE_MARGIN` from the cell's top. Scaling plus
+    // compensation has to land on that same absolute place.
+    expect(cropLineAfterShift).toBeCloseTo(SIZE + EDGE_MARGIN, 6);
+  });
+
+  it("leaves the side peeks unscaled", () => {
+    // Only the bottom peek shrinks; the sides are narrow slivers already.
+    expect(peekCellSize("left", SIZE)).toBe(SIZE);
+    expect(peekCellSize("right", SIZE)).toBe(SIZE);
+    expect(peekCellSize(null, SIZE)).toBe(SIZE);
+    expect(peekCellSize("bottom", SIZE)).toBeCloseTo(SIZE * BOTTOM_PEEK_SCALE, 6);
+    expect(peekShift("left", SIZE, EDGE_MARGIN).y).toBe(0);
+    expect(peekShift("right", SIZE, EDGE_MARGIN).y).toBe(0);
   });
 
   it("scales with the standee size", () => {
@@ -136,6 +166,29 @@ describe("peekShift", () => {
     // The anchor is proportional, so doubling the size must move the crop line
     // by the anchor's own share of the extra height.
     expect(large.y - EDGE_MARGIN).toBeCloseTo(2 * (small.y - EDGE_MARGIN), 6);
+  });
+});
+
+describe("peekShift literals match PEEK_ANCHORS", () => {
+  // `peekShift` spells the anchors out as literals because it runs on the UI
+  // thread and must not capture the module object. That copy can drift, so pin
+  // it: every edge's shift has to equal what the table says.
+  const EDGES: readonly PeekEdge[] = ["left", "right", "bottom"];
+
+  it("derives the same shift as the anchor table", () => {
+    for (const edge of EDGES) {
+      const anchor = PEEK_ANCHORS[edge];
+      const shift = peekShift(edge, SIZE, EDGE_MARGIN);
+      if (edge === "left") {
+        expect(shift.x).toBeCloseTo(-anchor.x * SIZE - EDGE_MARGIN, 6);
+      } else if (edge === "right") {
+        expect(shift.x).toBeCloseTo(SIZE * (1 - anchor.x) + EDGE_MARGIN, 6);
+      } else {
+        const scale = BOTTOM_PEEK_SCALE;
+        const compensation = (1 - scale) * (anchor.y - 0.5) * SIZE;
+        expect(shift.y).toBeCloseTo(SIZE * (1 - anchor.y) + EDGE_MARGIN + compensation, 6);
+      }
+    }
   });
 });
 

@@ -159,6 +159,28 @@ export const PEEK_POSES: Readonly<Record<PeekEdge, PoseName>> = {
  * body ends up roughly 1pt outside the viewport, so the wall is always cropped
  * rather than sometimes leaving a sliver of it inside the screen.
  */
+/**
+ * Extra scale applied to the bottom peek, on top of the shared standee size.
+ *
+ * Only the bottom peek shrinks: it hangs on the composer bar, where a body-sized
+ * sprite crowds the input row, while the side peeks are narrow slivers already
+ * and read better at full size. Scaling the art also moves the crop line inside
+ * the cell, so `peekShift` has to see the scaled size — see `peekCellSize`.
+ */
+export const BOTTOM_PEEK_SCALE = 0.9;
+
+/**
+ * The size a peek cell occupies for `edge`, after its own scale.
+ *
+ * The shift that parks the cell off-screen is measured against the artwork, so a
+ * scaled peek needs the scaled number here or the crop line drifts off the
+ * composer ledge by `(1 - scale) * size * (1 - anchor.y)`.
+ */
+export function peekCellSize(edge: PeekEdge | null, size: number): number {
+  "worklet";
+  return edge === "bottom" ? size * BOTTOM_PEEK_SCALE : size;
+}
+
 export const PEEK_ANCHORS: Readonly<Record<PeekEdge, { x: number; y: number }>> = {
   bottom: { x: 0.5, y: 0.895 },
   left: { x: 0.273, y: 0.5 },
@@ -296,10 +318,19 @@ export function peekShift(
 ): { readonly x: number; readonly y: number } {
   "worklet";
   if (edge === null) return { x: 0, y: 0 };
-  const anchor = PEEK_ANCHORS[edge];
-  if (edge === "left") return { x: -anchor.x * size - edgeMargin, y: 0 };
-  if (edge === "right") return { x: size * (1 - anchor.x) + edgeMargin, y: 0 };
-  return { x: 0, y: size * (1 - anchor.y) + edgeMargin };
+  // The anchors are spelled out here rather than read out of `PEEK_ANCHORS`.
+  // This runs on the UI thread, and a worklet that reaches into a module-level
+  // object makes Reanimated serialise that object on every capture; when that
+  // fails the throw surfaces as an uncaught JS error from the gesture reset path,
+  // which aborts the app. Literals cannot fail to capture. `peek-anchors.test`
+  // keeps the two copies in step.
+  const scale = edge === "bottom" ? BOTTOM_PEEK_SCALE : 1;
+  if (edge === "left") return { x: -0.273 * size - edgeMargin, y: 0 };
+  if (edge === "right") return { x: size * (1 - 0.705) + edgeMargin, y: 0 };
+  // A scaled peek is drawn around the cell's centre, so its crop line climbs by
+  // `(1 - scale) * (anchorY - 0.5) * size`; shift the cell back down by that much.
+  const compensation = (1 - scale) * (0.895 - 0.5) * size;
+  return { x: 0, y: size * (1 - 0.895) + edgeMargin + compensation };
 }
 
 /**

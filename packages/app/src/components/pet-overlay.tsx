@@ -101,6 +101,7 @@ import {
   clampToBounds,
   isIdleSeriesPose,
   parseStoredPosition,
+  peekCellSize,
   peekShift,
   peekSnapThreshold,
   pickIdleRandomPose,
@@ -1262,7 +1263,13 @@ export function PetOverlay() {
             (1 - poseIn.value) * POSE_IN_PX,
         },
         { rotate: `${sway.value * 1.2 * idle}deg` },
-        { scale: pressScale.value * (1 + (1 - poseIn.value) * 0.04) },
+        {
+          scale:
+            (pressScale.value *
+              (1 + (1 - poseIn.value) * 0.04) *
+              peekCellSize(peekEdgeShared.value, PET_SIZE)) /
+            PET_SIZE,
+        },
       ],
     };
   });
