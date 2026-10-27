@@ -235,6 +235,38 @@ export function clampToBounds(
 }
 
 /**
+ * The resting cell position for a pet hanging off `edge`.
+ *
+ * The cell itself stays inside the screen at the edge's margin; `peekShift`
+ * then moves the *art* past the edge. Keeping the two apart is what lets the
+ * position survive a viewport change (a clamped cell is still a valid cell)
+ * while the offset stays a pure function of the edge.
+ *
+ * `position` must already be clamped to the bounds. Side edges keep the
+ * along-the-edge coordinate the user chose; the bottom edge keeps the x.
+ * `null` (no snap) returns the position untouched, so the drop handler can use
+ * one expression for both outcomes.
+ *
+ * `"worklet"` because the drop handler runs on the UI thread.
+ */
+export function snapToPeekEdge(
+  edge: PeekEdge | null,
+  position: { readonly x: number; readonly y: number },
+  bounds: {
+    readonly minX: number;
+    readonly maxX: number;
+    readonly minY: number;
+    readonly maxY: number;
+  },
+): { readonly x: number; readonly y: number } {
+  "worklet";
+  if (edge === "left") return { x: bounds.minX, y: position.y };
+  if (edge === "right") return { x: bounds.maxX, y: position.y };
+  if (edge === "bottom") return { x: position.x, y: bounds.maxY };
+  return position;
+}
+
+/**
  * Where a *cancelled* drag should leave the cell.
  *
  * `onStart` folds the peek offset into the cell, so a cancelled pan (which never
@@ -245,6 +277,13 @@ export function clampToBounds(
  * A still-set `edge` is re-snapped first: `clearPeek` is dispatched through
  * `runOnJS`, so the ref can legitimately still hold the old edge on the frame
  * the gesture is cancelled.
+ *
+ * Defined after `snapToPeekEdge` on purpose. The worklet compiler snapshots a
+ * function's closure when its factory runs, at the definition site, so a worklet
+ * that calls another worklet defined *later* in the file captures `undefined`
+ * and throws `TypeError` on the UI thread the first time the branch runs. This
+ * module's worklets must stay ordered by dependency; `worklet-order.test.ts`
+ * enforces it.
  */
 export function settleCancelledDrag(
   position: { readonly x: number; readonly y: number },
@@ -318,19 +357,14 @@ export function peekShift(
 ): { readonly x: number; readonly y: number } {
   "worklet";
   if (edge === null) return { x: 0, y: 0 };
-  // The anchors are spelled out here rather than read out of `PEEK_ANCHORS`.
-  // This runs on the UI thread, and a worklet that reaches into a module-level
-  // object makes Reanimated serialise that object on every capture; when that
-  // fails the throw surfaces as an uncaught JS error from the gesture reset path,
-  // which aborts the app. Literals cannot fail to capture. `peek-anchors.test`
-  // keeps the two copies in step.
-  const scale = edge === "bottom" ? BOTTOM_PEEK_SCALE : 1;
-  if (edge === "left") return { x: -0.273 * size - edgeMargin, y: 0 };
-  if (edge === "right") return { x: size * (1 - 0.705) + edgeMargin, y: 0 };
+  const anchor = PEEK_ANCHORS[edge];
   // A scaled peek is drawn around the cell's centre, so its crop line climbs by
-  // `(1 - scale) * (anchorY - 0.5) * size`; shift the cell back down by that much.
-  const compensation = (1 - scale) * (0.895 - 0.5) * size;
-  return { x: 0, y: size * (1 - 0.895) + edgeMargin + compensation };
+  // `(1 - scale) * (anchor.y - 0.5) * size`. Shift the cell back down by that much.
+  const scale = peekCellSize(edge, size) / size;
+  const compensation = (1 - scale) * (anchor.y - 0.5) * size;
+  if (edge === "left") return { x: -anchor.x * size - edgeMargin, y: compensation };
+  if (edge === "right") return { x: size * (1 - anchor.x) + edgeMargin, y: compensation };
+  return { x: 0, y: size * (1 - anchor.y) + edgeMargin + compensation };
 }
 
 /**
@@ -430,38 +464,6 @@ export function resolveDragDropEdge(input: {
 /** Whether `value` is one of the edges this module knows about. */
 export function isPeekEdge(value: unknown): value is PeekEdge {
   return value === "bottom" || value === "left" || value === "right";
-}
-
-/**
- * The resting cell position for a pet hanging off `edge`.
- *
- * The cell itself stays inside the screen at the edge's margin; `peekShift`
- * then moves the *art* past the edge. Keeping the two apart is what lets the
- * position survive a viewport change (a clamped cell is still a valid cell)
- * while the offset stays a pure function of the edge.
- *
- * `position` must already be clamped to the bounds. Side edges keep the
- * along-the-edge coordinate the user chose; the bottom edge keeps the x.
- * `null` (no snap) returns the position untouched, so the drop handler can use
- * one expression for both outcomes.
- *
- * `"worklet"` because the drop handler runs on the UI thread.
- */
-export function snapToPeekEdge(
-  edge: PeekEdge | null,
-  position: { readonly x: number; readonly y: number },
-  bounds: {
-    readonly minX: number;
-    readonly maxX: number;
-    readonly minY: number;
-    readonly maxY: number;
-  },
-): { readonly x: number; readonly y: number } {
-  "worklet";
-  if (edge === "left") return { x: bounds.minX, y: position.y };
-  if (edge === "right") return { x: bounds.maxX, y: position.y };
-  if (edge === "bottom") return { x: position.x, y: bounds.maxY };
-  return position;
 }
 
 /** The standees `computeState` may return for a quiet pet. */
