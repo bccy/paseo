@@ -167,8 +167,7 @@ export default {
         {
           // Chinese permission copy: the desk pet's double tap reads the newest
           // photo and adds it to the chat draft (never sends it).
-          photosPermission:
-            "允许 $(PRODUCT_NAME) 读取你的相册，把最新一张照片加入聊天输入框。",
+          photosPermission: "允许 $(PRODUCT_NAME) 读取你的相册，把最新一张照片加入聊天输入框。",
           savePhotosPermission: "允许 $(PRODUCT_NAME) 把照片保存到你的相册。",
           isAccessMediaLocationEnabled: false,
         },

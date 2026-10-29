@@ -46,10 +46,7 @@ function mimeTypeForFilename(filename: string): string {
  * would otherwise drop the persisted text/attachments that have not been read
  * yet.
  */
-async function appendImageToDraft(
-  draftKey: string,
-  metadata: AttachmentMetadata,
-): Promise<void> {
+async function appendImageToDraft(draftKey: string, metadata: AttachmentMetadata): Promise<void> {
   const store = useDraftStore.getState();
   await store.hydrateDraftInput({ draftKey });
   const current = store.getDraftInput(draftKey) ?? { text: "", attachments: [] };
