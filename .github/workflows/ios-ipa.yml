@@ -8,8 +8,7 @@
 #   IOS_KEYCHAIN_PASSWORD CI 临时钥匙串密码（任意）
 #
 # 硬约束：描述文件授权的 App ID 必须等于 BUNDLE_ID，且只能安装到描述文件里登记的设备。
-# 依赖补丁（expo-image-picker 17.0.10 / expo-image-manipulator 14.0.8）由 npm ci 的
-# postinstall 通过 patches/ 自动应用，这里不需要关心。
+# 依赖补丁由 npm ci 的 postinstall 通过 patches/ 自动应用，这里不需要关心。
 
 name: iOS signed ipa
 
