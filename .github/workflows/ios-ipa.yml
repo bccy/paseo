@@ -1,5 +1,5 @@
 # 在 CI 里用仓库证书把 iOS 包签好（ad-hoc），产出可直接安装的 ipa。
-# 触发：push 到本分支自动构建；也可在 Actions 页手动 Run。
+# 触发：push 到 main 自动构建；也可在 Actions 页手动 Run。
 #
 # 需要的 Secrets：
 #   IOS_CERT_P12_BASE64   Apple Distribution 证书 .p12 的 base64
@@ -14,7 +14,7 @@ name: iOS signed ipa
 
 on:
   push:
-    branches: [ios-ipa, "trial/**"]
+    branches: [main, "trial/**"]
   workflow_dispatch:
 
 env:
