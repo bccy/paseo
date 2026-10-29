@@ -24,6 +24,7 @@ import {
 } from "@/provider-selection/provider-selection";
 import { useDraftStore } from "@/stores/draft-store";
 import { AfterPaintPublication } from "@/composer/after-paint-publication";
+import { composeSlashCommandInsert } from "@/composer/draft/slash-command-insert";
 import { useShallow } from "zustand/shallow";
 import type { ComposerTextSource } from "@/composer/text-source";
 import { isWeb } from "@/constants/platform";
@@ -122,6 +123,9 @@ export function useAgentInputDraft(input: UseAgentInputDraftInput): AgentInputDr
   const [hydratedDraftKey, setHydratedDraftKey] = useState<string | null>(null);
   const isHydrated = hydratedDraftKey === draftKey;
   const textReplacementRevisionRef = useRef(0);
+  // The text the user currently sees. On web the store write is staged until
+  // after paint, so the store alone can be one frame behind the input.
+  const latestTextRef = useRef<string>(textSource.getSnapshot());
   const [textReplacement, setTextReplacement] = useState<TextReplacement>(() => ({
     kind: "initial",
     key: `${draftKey}:0`,
@@ -162,6 +166,7 @@ export function useAgentInputDraft(input: UseAgentInputDraftInput): AgentInputDr
   const textPublication = useMemo(
     () =>
       new AfterPaintPublication<string>((nextText) => {
+        latestTextRef.current = nextText;
         useDraftStore.getState().editDraftText({ draftKey, text: nextText });
       }),
     [draftKey],
@@ -169,6 +174,10 @@ export function useAgentInputDraft(input: UseAgentInputDraftInput): AgentInputDr
 
   const editText = useCallback(
     (nextText: string) => {
+      // Web publication happens after paint, so the store can lag the input by a
+      // frame. Track the text here as well: an insert request has to merge with
+      // what the user sees, not with the last persisted value.
+      latestTextRef.current = nextText;
       if (isWeb) {
         textPublication.stage(nextText);
       } else {
@@ -181,16 +190,26 @@ export function useAgentInputDraft(input: UseAgentInputDraftInput): AgentInputDr
   const replaceText = useCallback(
     (nextText: string) => {
       textPublication.cancel();
+      latestTextRef.current = nextText;
       useDraftStore.getState().editDraftText({ draftKey, text: nextText });
       publishTextReplacement("replace", nextText);
     },
     [draftKey, publishTextReplacement, textPublication],
   );
 
+  // A different draft means different text; the ref must not carry the previous
+  // draft's prose into an insert that arrives before hydration settles.
+  useEffect(() => {
+    latestTextRef.current = textSource.getSnapshot();
+  }, [draftKey, textSource]);
+
   // Text insertions from outside the composer (the desk pet's slash-command
   // menu) arrive through the draft store and are applied through the same
   // `textReplacement` path the composer itself uses: the native input is
   // uncontrolled, so a draft-store text write alone would not be visible.
+  //
+  // The command is merged into the head of the draft, never swapped for it: the
+  // user's prose survives picking a command.
   //
   // The request is consumed on apply and the applied revision lives in the
   // store: a ref here would reset when the composer remounts and replay the old
@@ -198,7 +217,12 @@ export function useAgentInputDraft(input: UseAgentInputDraftInput): AgentInputDr
   useEffect(() => {
     if (textInsertRequest === null) return;
     if (textInsertRequest.revision <= appliedTextInsertRevision) return;
-    replaceText(textInsertRequest.text);
+    replaceText(
+      composeSlashCommandInsert({
+        currentText: latestTextRef.current,
+        insert: textInsertRequest.text,
+      }),
+    );
     useDraftStore.getState().consumeTextInsertRequest({
       draftKey,
       revision: textInsertRequest.revision,
@@ -218,6 +242,7 @@ export function useAgentInputDraft(input: UseAgentInputDraftInput): AgentInputDr
   const clear = useCallback(
     (lifecycle: "sent" | "abandoned") => {
       textPublication.cancel();
+      latestTextRef.current = "";
       useDraftStore.getState().clearDraftInput({ draftKey, lifecycle });
     },
     [draftKey, textPublication],
@@ -253,6 +278,7 @@ export function useAgentInputDraft(input: UseAgentInputDraftInput): AgentInputDr
       await useDraftStore.getState().hydrateDraftInput({ draftKey });
       if (!cancelled) {
         const hydratedText = useDraftStore.getState().getDraftInput(draftKey)?.text ?? "";
+        latestTextRef.current = hydratedText;
         publishTextReplacement("hydrated", hydratedText);
         setHydratedDraftKey(draftKey);
       }

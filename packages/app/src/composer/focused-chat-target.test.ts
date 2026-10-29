@@ -26,7 +26,7 @@ describe("focused chat target", () => {
         serverId: "server-1",
         layout: layoutWithTarget({ kind: "agent", agentId: "agent-1" }),
       }),
-    ).toEqual({ tabId: "focused-tab", draftKey: "agent:server-1:agent-1" });
+    ).toEqual({ tabId: "focused-tab", draftKey: "agent:server-1:agent-1", agentId: "agent-1" });
   });
 
   it("targets the focused unsent draft", () => {
@@ -35,7 +35,7 @@ describe("focused chat target", () => {
         serverId: "server-1",
         layout: layoutWithTarget({ kind: "draft", draftId: "draft-1" }),
       }),
-    ).toEqual({ tabId: "focused-tab", draftKey: "draft:server-1:draft-1" });
+    ).toEqual({ tabId: "focused-tab", draftKey: "draft:server-1:draft-1", agentId: null });
   });
 
   it("does not guess when the focused tab is not a chat", () => {
@@ -72,6 +72,7 @@ describe("focused chat target", () => {
     expect(resolveFocusedChatTarget({ serverId: "server-1", layout })).toEqual({
       tabId: "agent-tab",
       draftKey: "agent:server-1:agent-1",
+      agentId: "agent-1",
     });
   });
   it("targets a chat in a neighbouring pane when the focused pane holds none", () => {
@@ -116,6 +117,7 @@ describe("focused chat target", () => {
     expect(resolveFocusedChatTarget({ serverId: "server-1", layout })).toEqual({
       tabId: "agent-tab",
       draftKey: "agent:server-1:agent-1",
+      agentId: "agent-1",
     });
   });
 });

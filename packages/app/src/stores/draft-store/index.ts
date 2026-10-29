@@ -54,9 +54,10 @@ interface DraftStoreActions {
     attachment: WorkspaceFileComposerAttachment;
   }) => Promise<void>;
   /**
-   * Ask the mounted composer to replace its text. The native input is
-   * uncontrolled and only reacts to `textReplacement`, so writing the draft text
-   * alone would not show up until the composer remounts.
+   * Ask the mounted composer to put this text at the head of its draft, keeping
+   * the text the user already typed. The native input is uncontrolled and only
+   * reacts to `textReplacement`, so writing the draft text alone would not show
+   * up until the composer remounts.
    */
   requestTextInsert: (input: { draftKey: string; text: string }) => void;
   /**

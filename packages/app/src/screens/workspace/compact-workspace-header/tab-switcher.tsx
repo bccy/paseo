@@ -12,6 +12,7 @@ import {
   type WorkspaceTabPresentation,
 } from "@/screens/workspace/workspace-tab-presentation";
 import { useFilePanelOpenWithMenu } from "@/file-panels";
+import { useRetainedPanelActive } from "@/components/retained-panel";
 import { MobileTabTrailingAccessory } from "@/screens/workspace/workspace-tab-trailing-accessory";
 import {
   buildWorkspaceTabMenuEntries,
@@ -328,16 +329,26 @@ export const MobileWorkspaceTabSwitcher = memo(function MobileWorkspaceTabSwitch
   const triggerStyle = useIconButtonChromeStyle({ size: "large" });
   // Open state lives in a store: the header trigger still toggles it, and the
   // desk pet's triple tap can open the panel from outside this component tree.
-  const isOpen = useWorkspaceTabSwitcherStore((state) => state.isOpen);
+  const panelActive = useRetainedPanelActive();
+  const storeIsOpen = useWorkspaceTabSwitcherStore((state) => state.isOpen);
+  // A retained-but-inactive workspace keeps this component mounted, and the
+  // combobox portals its overlay outside the hidden panel — so only the visible
+  // workspace may claim the store's open state.
+  const isOpen = panelActive && storeIsOpen;
   const setOpen = useWorkspaceTabSwitcherStore((state) => state.setOpen);
   const anchorRef = useRef<View>(null);
 
-  // Leaving the workspace must not leave the panel armed for the next mount.
+  // The store's `open()` is gated on a registered consumer, so the pet's triple
+  // tap cannot arm the panel for a workspace the user is not looking at. Only the
+  // visible workspace registers: the deck keeps up to ten of them mounted, and
+  // without this every one of them would open at once.
+  //
+  // Unregistering the last consumer closes the panel inside the store, so leaving
+  // the workspace cannot leave it armed for the next mount.
   useEffect(() => {
-    return () => {
-      useWorkspaceTabSwitcherStore.getState().close();
-    };
-  }, []);
+    if (!panelActive) return;
+    return useWorkspaceTabSwitcherStore.getState().register();
+  }, [panelActive]);
   const tabIndexByKey = useMemo(() => {
     const map = new Map<string, number>();
     tabs.forEach((tab, index) => {
