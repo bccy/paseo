@@ -18,7 +18,10 @@ on:
 
 jobs:
   deploy:
-    if: ${{ github.event_name != 'release' || (!github.event.release.prerelease && !github.event.release.draft) }}
+    # This fork has no CLOUDFLARE_API_TOKEN, so wrangler deploy fails after a full
+    # build. The site it publishes is paseo.sh, which upstream deploys from its own
+    # main; this fork only needs the iOS package.
+    if: ${{ github.repository == 'getpaseo/paseo' && (github.event_name != 'release' || (!github.event.release.prerelease && !github.event.release.draft)) }}
     runs-on: ubuntu-latest
 
     steps:

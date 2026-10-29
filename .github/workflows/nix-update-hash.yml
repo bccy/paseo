@@ -23,6 +23,10 @@ permissions:
 
 jobs:
   update-hash:
+    # This fork has no PASEO_BOT_APP_ID / PASEO_BOT_APP_PRIVATE_KEY, so the token
+    # step fails before anything runs. The job only maintains the Nix hash, which
+    # nothing in this fork consumes; upstream's own main keeps it current.
+    if: ${{ github.repository == 'getpaseo/paseo' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/create-github-app-token@v1
