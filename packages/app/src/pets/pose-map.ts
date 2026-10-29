@@ -467,10 +467,10 @@ export function isPeekEdge(value: unknown): value is PeekEdge {
 }
 
 /** The standees `computeState` may return for a quiet pet. */
-const IDLE_SERIES_POSES: readonly string[] = ["idle-cute", "afk", "sleep"];
+const IDLE_SERIES_POSES: ReadonlySet<string> = new Set(["idle-cute", "afk", "sleep"]);
 
 export function isIdleSeriesPose(pose: string | null | undefined): boolean {
-  return pose !== null && pose !== undefined && IDLE_SERIES_POSES.includes(pose);
+  return pose !== null && pose !== undefined && IDLE_SERIES_POSES.has(pose);
 }
 
 /**
@@ -588,9 +588,6 @@ export function resolveToolPose(
   }
   return "work-ram";
 }
-
-/** Tap reactions. The whole standee is one button, so these rotate per tap. */
-export const PAT_POSES: readonly PoseName[] = ["react-head", "react-belly", "react-tail"];
 
 /**
  * Standees shown by consecutive pats, in rotation order.
@@ -718,12 +715,6 @@ export const IDLE_RANDOM_MAX_MS = 300000;
  */
 export const IDLE_RANDOM_HOLD_MS = 60000;
 
-export function pickPatPose(isWorking: boolean, rng: () => number = Math.random): PoseName {
-  if (isWorking) return WORKING_PAT_POSE;
-  const index = Math.floor(rng() * PAT_POSES.length);
-  return PAT_POSES[Math.min(PAT_POSES.length - 1, Math.max(0, index))] ?? WORKING_PAT_POSE;
-}
-
 export function pickRandomMemePose(rng: () => number = Math.random): PoseName {
   const index = Math.floor(rng() * RANDOM_MEME_POSES.length);
   return (
@@ -789,29 +780,27 @@ export interface OverlayPoseContext {
  * `idleRandom` expires after IDLE_RANDOM_HOLD_MS so the quiet poses (`afk`, and
  * `sleep` at night) are visible between the 3-5 minute draws.
  */
-export function resolveOverlayPose(context: OverlayPoseContext): PoseName {
-  const { now } = context;
-
-  // Direct interaction answers immediately, whatever the state machine says.
-  if (context.dragging) return PICK_UP_POSE;
-  if (context.pat !== null && now < context.pat.until) return context.pat.pose;
-
-  const statePose = normalizeStatePose(context.statePose);
-  const tool = context.tool;
+/**
+ * The newest tool standee still inside the 60s window, or `null`.
+ *
+ * Split out of `resolveOverlayPose` to keep that function under the complexity
+ * cap; the window is the "just finished" smoothing, not a second priority layer.
+ */
+function recentToolPoseOf(context: OverlayPoseContext): PoseName | null {
   const recentTool = context.recentTool;
-  const recentToolPose =
-    recentTool !== null && recentTool.pose !== null && now - recentTool.at <= TOOL_POSE_WINDOW_MS
-      ? recentTool.pose
-      : null;
+  if (recentTool === null || recentTool.pose === null) return null;
+  return context.now - recentTool.at <= TOOL_POSE_WINDOW_MS ? recentTool.pose : null;
+}
 
-  // While working, the tool layer may refine the generic running standee.
-  if (statePose === "running") {
-    const runningPose = tool !== null && tool.pose !== null ? tool.pose : null;
-    return runningPose ?? recentToolPose ?? "running";
-  }
-  // Every other non-idle pose is protected from every decoration layer.
-  if (!isIdleSeriesPose(statePose)) return statePose;
-
+/**
+ * The decoration layers that may replace a quiet pose, in priority order.
+ *
+ * Only reached once the state machine says the pet is idle: a recent tool, then a
+ * keyword reaction, then a celebration, then the 3-5 minute variety pick.
+ */
+function resolveIdleDecoration(context: OverlayPoseContext): PoseName | null {
+  const { now } = context;
+  const recentToolPose = recentToolPoseOf(context);
   if (recentToolPose !== null) return recentToolPose;
   if (context.keyword !== null && now - context.keyword.at <= KEYWORD_POSE_WINDOW_MS) {
     return context.keyword.pose;
@@ -822,6 +811,30 @@ export function resolveOverlayPose(context: OverlayPoseContext): PoseName {
   if (context.idleRandom !== null && now - context.idleRandom.pickedAt <= IDLE_RANDOM_HOLD_MS) {
     return context.idleRandom.pose;
   }
+  return null;
+}
+
+export function resolveOverlayPose(context: OverlayPoseContext): PoseName {
+  const { now } = context;
+
+  // Direct interaction answers immediately, whatever the state machine says.
+  if (context.dragging) return PICK_UP_POSE;
+  if (context.pat !== null && now < context.pat.until) return context.pat.pose;
+
+  const statePose = normalizeStatePose(context.statePose);
+  const tool = context.tool;
+  const recentToolPose = recentToolPoseOf(context);
+
+  // While working, the tool layer may refine the generic running standee.
+  if (statePose === "running") {
+    const runningPose = tool !== null && tool.pose !== null ? tool.pose : null;
+    return runningPose ?? recentToolPose ?? "running";
+  }
+  // Every other non-idle pose is protected from every decoration layer.
+  if (!isIdleSeriesPose(statePose)) return statePose;
+
+  const decoration = resolveIdleDecoration(context);
+  if (decoration !== null) return decoration;
 
   if (statePose === "afk" || statePose === "sleep") {
     return isNightHour(context.hour) ? "sleep" : "afk";

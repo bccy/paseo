@@ -3,12 +3,11 @@ export { ComposerDockBackground } from "./internal/background";
 export { ComposerFullscreenBody, ComposerFullscreenFooter } from "./internal/fullscreen";
 import { ScrollView } from "@/components/ui/scroll-view";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useComposerInsetStore, useKeyboardClearanceStore } from "@/stores/composer-inset-store";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { HEADER_INNER_HEIGHT } from "@/constants/layout";
 import { resolveContentMaxWidth, useAppSettings } from "@/hooks/use-settings";
 import { KeyboardTranslateView } from "@/keyboard/shift";
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
 import { View, type LayoutChangeEvent, type ViewProps, StyleSheet } from "react-native";
 import { StyleSheet as ThemedStyleSheet } from "react-native-unistyles";
 import Animated, {
@@ -128,31 +127,8 @@ export function ComposerDock({
   fullscreen = false,
 }: ComposerDockProps) {
   const insets = useSafeAreaInsets();
-  const setComposerInset = useComposerInsetStore((state) => state.setInset);
-  // The wrapper below pads by `insets.bottom`, so its measured height is exactly
-  // the distance from the screen bottom to the input bar's top edge. Reporting it
-  // beats any constant: a multi-line draft, a larger dynamic type size or a
-  // different home-indicator inset all change the number.
-  const reportComposerInset = useCallback(
-    (event: LayoutChangeEvent) => {
-      if (fullscreen) return;
-      setComposerInset(event.nativeEvent.layout.height);
-    },
-    [fullscreen, setComposerInset],
-  );
   const contentMaxWidth = resolveContentMaxWidth(useAppSettings().settings);
   const centeredClearance = useCenteredClearance(insets.bottom);
-  const setKeyboardClearance = useKeyboardClearanceStore((state) => state.setClearance);
-  // `KeyboardTranslateView` moves the composer by the keyboard height plus this
-  // clearance, so the pet needs that number to hang on the right line. It is a
-  // plain JS value here, which is why it is what gets reported: the keyboard
-  // height on that view is an `AnimatedMultiplication`, and composed nodes do not
-  // accept `addListener`, so mirroring the whole graph from inside the dock
-  // silently reported nothing at all.
-  const clearance = centeredClearance.value;
-  useEffect(() => {
-    setKeyboardClearance(fullscreen ? 0 : clearance);
-  }, [clearance, fullscreen, setKeyboardClearance]);
 
   // Preserve the existing centered form's visual balance on tablets.
   const bottomInset = centered && !fullscreen ? HEADER_INNER_HEIGHT + 24 : 0;
@@ -235,7 +211,6 @@ export function ComposerDock({
                 ? fullscreenSurface
                 : [dockStyles.composer, { paddingBottom: insets.bottom }]
             }
-            onLayout={reportComposerInset}
           >
             {composer}
           </View>

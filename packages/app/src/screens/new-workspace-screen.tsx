@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { router } from "expo-router";
+import { useIsFocused } from "expo-router/react-navigation";
 import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { createNameId } from "mnemonic-id";
@@ -857,6 +858,16 @@ export function NewWorkspaceScreen({
   const { t } = useTranslation();
   const isCompact = useIsCompactFormFactor();
   const toast = useToast();
+  // This route stays mounted when another one is pushed over it (pushing settings
+  // does not unmount New workspace), and its composers hard-code
+  // `isPaneFocused={true}` because they are not inside a retained panel. Without a
+  // page-level signal the composer would keep claiming the desk pet's ledge from
+  // under the settings screen, parking a peek on an invisible input box.
+  //
+  // The focus is read *here* rather than inside `Composer` on purpose: `Composer`
+  // is also rendered outside any navigator (the workspace setup dialog), where
+  // `useIsFocused` throws. This screen is a `Stack.Screen`, so the hook is safe.
+  const isScreenFocused = useIsFocused();
   const composerEditing = useNewWorkspaceComposerEditing();
   const { leaveFullscreen } = composerEditing;
   const mergeWorkspaces = useCallback(
@@ -1534,6 +1545,7 @@ export function NewWorkspaceScreen({
       agentId={draftKey}
       serverId={selectedServerId}
       isPaneFocused={true}
+      isScreenFocused={isScreenFocused}
       onSubmitMessage={handleSubmitTerminalLaunch}
       allowEmptySubmit={true}
       submitButtonAccessibilityLabel={t("newWorkspace.launch.submit")}
@@ -1558,6 +1570,7 @@ export function NewWorkspaceScreen({
       agentId={draftKey}
       serverId={selectedServerId}
       isPaneFocused={true}
+      isScreenFocused={isScreenFocused}
       onSubmitMessage={handleSubmitNewWorkspace}
       allowEmptySubmit={true}
       submitButtonAccessibilityLabel={t("newWorkspace.create")}

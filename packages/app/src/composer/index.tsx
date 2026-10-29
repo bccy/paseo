@@ -13,7 +13,9 @@ import {
   Pressable,
   Text,
   StyleSheet as RNStyleSheet,
+  type LayoutChangeEvent,
   type PressableStateCallbackType,
+  type ViewStyle,
 } from "react-native";
 import type { TFunction } from "i18next";
 import {
@@ -125,6 +127,8 @@ import { submitAgentInput } from "@/composer/submit";
 import { ComposerRecall } from "@/composer/recall";
 import { createMessageSubmissionWriter } from "@/composer/submission/writer";
 import { ComposerKeyboardScopeProvider, useComposerKeyboardScope } from "@/composer/keyboard-scope";
+import { usePetLedgeReporting } from "@/pets/use-pet-ledge-reporting";
+import { useRetainedPanelActive } from "@/components/retained-panel";
 import { useAppSettings } from "@/hooks/use-settings";
 import { RenderProfile } from "@/utils/render-profiler";
 import { AfterPaintPublication } from "@/composer/after-paint-publication";
@@ -967,7 +971,7 @@ interface ComposerProps {
   /** Controlled agent controls rendered in input area (draft flows). */
   agentControls?: DraftAgentControlsProps;
   /** Extra styles merged onto the message input wrapper (e.g. elevated background). */
-  inputWrapperStyle?: import("react-native").ViewStyle;
+  inputWrapperStyle?: ViewStyle;
   /** Optional panel/container layout breakpoint. Defaults to the screen breakpoint. */
   isCompactLayout?: boolean;
   /**
@@ -988,6 +992,17 @@ interface ComposerProps {
    * `inputMode`.
    */
   editingSession?: ComposerEditingSession;
+  /**
+   * Whether the *screen* hosting this composer is the one on top.
+   *
+   * `isPaneFocused` answers a narrower question — "is this the user's pane" — and a
+   * screen that mounts its composer outside a retained panel (New workspace) keeps
+   * answering `true` after another route is pushed over it, because nothing unmounts
+   * it. The desk pet's ledge is the visible input box, so it needs the page-level
+   * answer too; the host screen passes it down. Defaults to `true` so every existing
+   * caller keeps its behaviour.
+   */
+  isScreenFocused?: boolean;
 }
 
 const EMPTY_ARRAY: readonly QueuedMessage[] = [];
@@ -1005,6 +1020,8 @@ function ComposerAutocompleteBinding({
   inputRef,
   children,
   anchorStyle,
+  anchorRef,
+  onAnchorLayout,
   show,
   ref,
 }: {
@@ -1018,6 +1035,8 @@ function ComposerAutocompleteBinding({
   inputRef: React.RefObject<MessageInputRef | null>;
   children: React.ReactNode;
   anchorStyle: React.ComponentProps<typeof View>["style"];
+  anchorRef: React.RefObject<View | null>;
+  onAnchorLayout: (event: LayoutChangeEvent) => void;
   show: boolean;
   ref: React.Ref<ComposerAutocompleteHandle>;
 }) {
@@ -1045,6 +1064,8 @@ function ComposerAutocompleteBinding({
     <ComposerAutocomplete
       visible={autocomplete.isVisible && isShown}
       anchorStyle={anchorStyle}
+      anchorRef={anchorRef}
+      onAnchorLayout={onAnchorLayout}
       options={autocomplete.options}
       selectedIndex={autocomplete.selectedIndex}
       onSelect={onSelect}
@@ -1278,6 +1299,7 @@ function ComposerContentImpl({
   readOnly = false,
   submitLabel,
   placeholder,
+  isScreenFocused: isScreenFocusedProp,
 }: ComposerContentProps) {
   const mode = resolveComposerInputMode(inputMode);
   const { t } = useTranslation();
@@ -1385,6 +1407,26 @@ function ComposerContentImpl({
   const isFullscreen = useComposerFullscreen(editingSession);
   const [sendError, setSendError] = useState<string | null>(null);
   const [isMessageInputFocused, setIsMessageInputFocused] = useState(false);
+  // The pet hangs its bottom peek on this composer's input box, so this composer
+  // reports the ledge — but only while it is the one the user is actually in. A
+  // retained panel and a draft tab are mounted at the same time, and a screen
+  // without a composer (settings, the project list) must not inherit one.
+  const { isActiveComposer } = useComposerKeyboardScope();
+  const isPanelActive = useRetainedPanelActive();
+  const screenFocused = isScreenFocusedProp ?? true;
+  /**
+   * The anchor element the autocomplete popover already renders around the input
+   * column. It is reused as the pet's ledge anchor rather than wrapping the column
+   * in a second view: its top edge *is* the bordered input box's top edge (the
+   * queue list and the send error are siblings above it, and every layer down to
+   * the box is padding-free), and a wrapper would add a JSX level to a render path
+   * that is already at the depth limit.
+   */
+  const petLedgeAnchorRef = useRef<View | null>(null);
+  const petLedge = usePetLedgeReporting({
+    ref: petLedgeAnchorRef,
+    active: isActiveComposer && isPanelActive && screenFocused && !isFullscreen,
+  });
   const [isGithubPickerOpen, setIsGithubPickerOpen] = useState(false);
   const [githubSearchQuery, setGithubSearchQuery] = useState("");
   const [lightboxMetadata, setLightboxMetadata] = useState<AttachmentMetadata | null>(null);
@@ -2447,6 +2489,8 @@ function ComposerContentImpl({
               recall={recall}
               inputRef={messageInputRef}
               anchorStyle={messageInputContainerStyle}
+              anchorRef={petLedgeAnchorRef}
+              onAnchorLayout={petLedge.onLayout}
               show={mode.showAutocomplete && !isFullscreen}
               ref={autocompleteRef}
               configuration={autocompleteConfiguration}

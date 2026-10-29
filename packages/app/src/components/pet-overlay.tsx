@@ -36,36 +36,16 @@
  * @module paseo/components/pet-overlay
  */
 
-import { useQuery } from "@tanstack/react-query";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Image } from "expo-image";
-import { DshIcon } from "@/components/icons/dsh-icon";
-import {
-  Archive,
-  Cpu,
-  Minimize2,
-  SlidersHorizontal,
-  SquarePen,
-  SquareTerminal,
-  Target,
-  Undo2,
-  type LucideIcon,
-} from "lucide-react-native";
 import { usePathname } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Keyboard,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  useWindowDimensions,
-  View,
-} from "react-native";
+import { Platform, StyleSheet, useWindowDimensions, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
   Easing,
   runOnJS,
+  useAnimatedReaction,
   useAnimatedStyle,
   useSharedValue,
   withRepeat,
@@ -74,16 +54,18 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useUnistyles } from "react-native-unistyles";
 import { useShallow } from "zustand/shallow";
 import { resolveFocusedChatTarget } from "@/composer/focused-chat-target";
+import { useToast } from "@/contexts/toast-context";
+import { useFetchQuery } from "@/data/query";
+import { KeyboardTranslateView, useKeyboardShift } from "@/keyboard/shift";
 import { useHostRuntimeClient } from "@/runtime/host-runtime";
-import { useComposerInsetStore, useKeyboardClearanceStore } from "@/stores/composer-inset-store";
 import { useDraftStore } from "@/stores/draft-store";
 import {
   useActiveWorkspaceSelection,
   useLastWorkspaceSelection,
 } from "@/stores/navigation-active-workspace-store";
+import { usePetLedgeStore, selectPetLedgeClaim } from "@/stores/pet-ledge-store";
 import { useSessionStore, type SessionState } from "@/stores/session-store";
 import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
 import { useWorkspaceTabSwitcherStore } from "@/stores/workspace-tab-switcher-store";
@@ -96,34 +78,46 @@ import {
   PAT_HOLD_MS,
   PEEK_POSES,
   PICK_UP_HOLD_MS,
+  PICK_UP_POSE,
   POSE_ASSETS,
   celebrationPose,
   clampToBounds,
   isIdleSeriesPose,
   parseStoredPosition,
-  peekCellSize,
+  BOTTOM_PEEK_SCALE,
   peekShift,
   peekSnapThreshold,
   pickIdleRandomPose,
   pickRandomMemePose,
   nextPatPose,
   resolveOverlayPose,
-  resolveDragDropEdge,
   resolveToolPose,
-  settleCancelledDrag,
-  snapToPeekEdge,
   WORKING_PAT_POSE,
   type PeekEdge,
   type PoseName,
   type StoredPetPosition,
 } from "../pets/pose-map";
+import {
+  foldDragOffsets,
+  projectReleasePoint,
+  resolveBottomPeekXRange,
+  resolveKeyboardTopClamp,
+  resolvePetLayerLift,
+  resolvePetSpriteScale,
+  resolveCancelledDropResting,
+  resolveRestBounds,
+  resolveSettledDropEdge,
+  snapPetToPeekEdge,
+} from "../pets/ledge";
 import { insertLatestPhotoIntoDraft } from "../pets/pet-latest-photo";
 import {
   buildPetSlashCommands,
   type PetSlashCommand,
   type RemoteSlashCommand,
 } from "../pets/pet-slash-commands";
+import { resolvePetPhotoFeedback } from "../pets/pet-photo-feedback";
 import { resolveTapBurstAction, TAP_BURST_WINDOW_MS } from "../pets/pet-taps";
+import { PetCommandMenu } from "../pets/pet-command-menu";
 
 // The upstream state machine is a UMD module with no DOM dependencies. Vendored
 // verbatim so its pose rules stay byte-identical to the source instead of
@@ -161,46 +155,60 @@ const STORAGE_KEY = "paseo.pet.position.v1";
 const EDGE_MARGIN = 10;
 /** How far from an edge a drop counts as "hang her there", in points. */
 const PEEK_SNAP_PX = peekSnapThreshold(PET_SIZE);
-/** Shared by the position and the peek shift so both settle at the same rate. */
-const SETTLE_SPRING = { damping: 18, stiffness: 180 } as const;
 /**
- * The composer reports its own height into `composer-inset-store`. Measuring it
- * beats any constant we could write here: the bar grows with a multi-line draft,
- * shifts with the dynamic type size, and its wrapper pads by the bottom safe
- * area, which varies per device.
+ * The settle spring.
+ *
+ * Critically damped on purpose (ζ = 1 needs `damping = 2 * sqrt(stiffness)`; at
+ * stiffness 180 that is ~26.8). The old `{ damping: 18, stiffness: 180 }` was
+ * underdamped (ζ ≈ 0.67), so the axis crossing the edge overshot the crop line and
+ * bounced back, which read as jitter on the input bar.
  */
-const FALLBACK_COMPOSER_INSET = 88;
+const SETTLE_SPRING = { damping: 27, stiffness: 180 } as const;
+/**
+ * Duration of the non-spring transitions that belong to the same settle: the peek
+ * weight (scale + idle damping) and the keyboard top clamp. Long enough to read as
+ * motion, short enough not to lag the finger.
+ */
+const SETTLE_MS = 220;
+/**
+ * How far ahead a release is projected, in milliseconds.
+ *
+ * `Gesture.Pan` reports velocity in points per second, so a release glides
+ * `velocity * (FLICK_PROJECTION_MS / 1000)` points. The projected point is then
+ * measured against the edges with the normal snap threshold, which is what makes a
+ * deliberate flick attach while a slow release in the middle of the screen stays
+ * put. 140ms is roughly a flick's own duration, so the projection lands about where
+ * the finger was heading.
+ */
+const FLICK_PROJECTION_MS = 140;
+/**
+ * The spring UIKit runs the keyboard on, for the iOS keyboard clamp.
+ *
+ * On iOS the Reanimated keyboard value jumps to its target when the motion starts,
+ * while the pet layer rides the native-driver translation frame by frame. Springing
+ * the clamp with the keyboard's own physics keeps a pet pushed down from the top in
+ * step with the layer instead of landing one keyboard-motion early.
+ * `react-native-keyboard-controller` reads the live `CASpringAnimation` off the
+ * keyboard layer; these are the values UIKit uses for it, so this is a close
+ * approximation, not the measured curve.
+ */
+const IOS_KEYBOARD_SPRING = { mass: 3, stiffness: 1000, damping: 500 } as const;
+/**
+ * Cross-fade for a standee swap.
+ *
+ * The old swap dimmed the whole sprite to 20% and bounced it. `expo-image`'s own
+ * `transition` cross-dissolves the two images inside the view instead, so the pet
+ * never goes translucent and the frames never flash. Shorter than the old 260ms:
+ * a cross-fade reads as a swap, not as an animation to watch.
+ */
+const POSE_TRANSITION = { duration: 160, timing: "ease-out", effect: "cross-dissolve" } as const;
+
 /** Screens where a pet would be noise rather than company. */
 const HIDDEN_ROUTES = new Set(["/welcome", "/pair-scan", "/open-project"]);
-
-/** Paseo's own mark, so its commands are visually distinct from DSH's. */
-const PASEO_MARK = require("../../assets/images/favicon-light.png");
-
-/**
- * Icon per slash command. Known command names get a matching glyph; anything
- * else falls back to the generic prompt icon instead of vanishing.
- */
-const COMMAND_ICONS: Readonly<Record<string, LucideIcon>> = {
-  exit: Archive,
-  quit: Archive,
-  q: Archive,
-  "replace-agent-with-draft": SquarePen,
-  goal: Target,
-  rewind: Undo2,
-  model: Cpu,
-  mode: SlidersHorizontal,
-  compact: Minimize2,
-};
-
-function iconForCommand(name: string): LucideIcon {
-  return COMMAND_ICONS[name] ?? SquareTerminal;
-}
 
 /** Upstream soft-set keyframes, rescaled out of the 512px standee space. */
 const BREATHE_PX = 4 * ART_TO_SCREEN * 2;
 const HOP_PX = 8 * ART_TO_SCREEN * 2;
-/** Upstream wm-pose-in: translateY(4px) + scale(1.04) -> identity. */
-const POSE_IN_PX = 4 * ART_TO_SCREEN * 2;
 
 /** State machine tick. */
 const TICK_MS = 500;
@@ -227,6 +235,16 @@ interface PetStoreSource {
 
 /** What the active conversation is doing, reduced to the fields the pet needs. */
 interface PetActivity {
+  /**
+   * The agent these signals belong to, or `null` when nothing is active.
+   *
+   * The edge effects below (turn closed, attention rose) are only meaningful within
+   * one conversation: switching from a running agent to an idle one closes no turn
+   * of the idle one's, but a bare boolean comparison sees "was open, now closed" and
+   * fires a spurious success. Carrying the id lets those effects rebuild their
+   * baseline on an agent change instead of firing.
+   */
+  agentId: string | null;
   /** Newest agent tool call that is still executing in the open turn, if any. */
   runningToolName: string | null;
   /** The shell command that running tool is executing (null when unavailable). */
@@ -256,6 +274,7 @@ interface PetActivity {
 }
 
 const EMPTY_ACTIVITY: PetActivity = {
+  agentId: null,
   runningToolName: null,
   runningToolCommand: null,
   runningToolAt: 0,
@@ -400,49 +419,86 @@ function latestStreamItem(session: SessionState, agentId: string): StreamItem | 
  * shallow comparison keeps the overlay from re-rendering on every streamed
  * token (a streaming delta changes the stream arrays, not these fields).
  */
+/** Whether the agent's newest stream item is a thought still streaming. */
+function isThoughtStreaming(session: SessionState, agentId: string, turnOpen: boolean): boolean {
+  if (!turnOpen) return false;
+  const latest = latestStreamItem(session, agentId);
+  return latest !== undefined && latest.kind === "thought" && latest.status === "loading";
+}
+
+/**
+ * The tool calls the pet mirrors: the one executing now (if any) and the newest of
+ * any status.
+ *
+ * A tool only counts as "running" while its own status says so AND its turn is
+ * still open — a canceled turn may leave a stale `running` flag in the stream. The
+ * newest call of any status feeds the "just did this" standee and smooths the
+ * running -> finished boundary.
+ */
+function selectToolMoments(
+  session: SessionState,
+  agentId: string,
+  turnOpen: boolean,
+  openTurnId: string | null,
+): { running: AgentToolMoment | null; recent: AgentToolMoment | null } {
+  return {
+    running: turnOpen
+      ? latestAgentToolCall(session, agentId, openTurnId, (data) => data.status === "running")
+      : null,
+    recent: latestAgentToolCall(session, agentId, openTurnId, () => true),
+  };
+}
+
+/** The flat tool fields, so `selectPetActivity` stays under the complexity cap. */
+function toolFields(tools: {
+  running: AgentToolMoment | null;
+  recent: AgentToolMoment | null;
+}): Pick<
+  PetActivity,
+  | "runningToolName"
+  | "runningToolCommand"
+  | "runningToolAt"
+  | "recentToolName"
+  | "recentToolCommand"
+  | "recentToolAt"
+> {
+  return {
+    runningToolName: tools.running?.name ?? null,
+    runningToolCommand: tools.running?.command ?? null,
+    runningToolAt: tools.running?.at ?? 0,
+    recentToolName: tools.recent?.name ?? null,
+    recentToolCommand: tools.recent?.command ?? null,
+    recentToolAt: tools.recent?.at ?? 0,
+  };
+}
+
+/** The keyword id for the newest user message, or `null` when nothing matched. */
+function keywordIdOf(userMessage: UserMessageItem | null): string | null {
+  return userMessage === null ? null : core.matchKeyword(userMessage.text, true);
+}
+
 function selectPetActivity(state: PetStoreSource): PetActivity {
   const active = pickActiveAgent(state);
   if (active === null) return EMPTY_ACTIVITY;
   const { session, agentId } = active;
 
   const userMessage = latestUserMessage(session, agentId);
-  const userAt = userMessage?.timestamp.getTime() ?? 0;
-
   // Turn + agent state of the conversation the pet mirrors. Signals are read
   // from this agent only — the old workspace-bucket union let another project,
   // terminal or sub-agent light the pet up.
   const agent = session.agents.get(agentId);
   const turn = agent?.turn;
   const turnOpen = turn?.phase === "open";
-  const openTurnId = turn !== undefined && turn.phase === "open" ? (turn.turnId ?? null) : null;
-
-  // A tool is only "running" while its own status says so AND its turn is still
-  // open — a canceled turn may leave a stale `running` flag in the stream.
-  const runningTool = turnOpen
-    ? latestAgentToolCall(session, agentId, openTurnId, (data) => data.status === "running")
-    : null;
-  // The most recent tool call of any status feeds the "just did this" standee
-  // (and smooths the running -> finished boundary).
-  const recentTool = latestAgentToolCall(session, agentId, openTurnId, () => true);
-
-  const latest = latestStreamItem(session, agentId);
-  // Streaming thought = the newest stream item is a thought that has not been
-  // finalized yet, inside an open turn.
-  const thought =
-    turnOpen && latest !== undefined && latest.kind === "thought" && latest.status === "loading";
-  const keywordId = userMessage === null ? null : core.matchKeyword(userMessage.text, true);
+  const openTurnId = turnOpen ? (turn?.turnId ?? null) : null;
+  const tools = selectToolMoments(session, agentId, turnOpen, openTurnId);
 
   return {
-    runningToolName: runningTool?.name ?? null,
-    runningToolCommand: runningTool?.command ?? null,
-    runningToolAt: runningTool?.at ?? 0,
-    recentToolName: recentTool?.name ?? null,
-    recentToolCommand: recentTool?.command ?? null,
-    recentToolAt: recentTool?.at ?? 0,
+    ...toolFields(tools),
+    agentId,
     turnOpen,
-    thought,
-    keywordId,
-    userAt,
+    thought: isThoughtStreaming(session, agentId, turnOpen),
+    keywordId: keywordIdOf(userMessage),
+    userAt: userMessage?.timestamp.getTime() ?? 0,
     agentError: agent?.status === "error",
     hasPendingPermission: (agent?.pendingPermissions.length ?? 0) > 0,
     requiresAttention: agent?.requiresAttention === true,
@@ -498,11 +554,8 @@ function selectMostRecentTodoList(state: PetStoreSource): TodoListSnapshot | nul
 
 export function PetOverlay() {
   const { width, height } = useWindowDimensions();
-  // The command sheet is the one piece of UI the pet draws, so it uses the app
-  // theme instead of hard-coded colours: it has to look like the rest of Paseo,
-  // including in light mode.
-  const { theme } = useUnistyles();
   const { top: topInset, bottom: bottomInset } = useSafeAreaInsets();
+  const toast = useToast();
   const pathname = usePathname();
 
   // The active conversation's running/recent tool call, user message, thought
@@ -567,7 +620,11 @@ export function PetOverlay() {
   const petServerId = chatSelection?.serverId ?? "";
   const petAgentId = focusedChat?.agentId ?? null;
   const petHostClient = useHostRuntimeClient(petServerId);
-  const { data: remoteSlashCommands } = useQuery({
+  // `useFetchQuery` rather than a bare `useQuery`: this file is not allowed to
+  // import `@tanstack/react-query` directly (lint: no-restricted-imports). The
+  // fetch variant is the plain one-shot read this is — nothing pushes updates for
+  // a daemon's command list.
+  const { data: remoteSlashCommands } = useFetchQuery({
     queryKey: ["pet-slash-commands", petServerId, petAgentId],
     queryFn: async (): Promise<RemoteSlashCommand[]> => {
       if (petHostClient === null || petAgentId === null) return [];
@@ -575,7 +632,8 @@ export function PetOverlay() {
       return response.commands as RemoteSlashCommand[];
     },
     enabled: petHostClient !== null && petAgentId !== null,
-    staleTime: 60_000,
+    staleTimeMs: 60_000,
+    dataShape: "list",
   });
 
   const [commandMenuVisible, setCommandMenuVisible] = useState(false);
@@ -604,32 +662,62 @@ export function PetOverlay() {
   const lastInteractionRef = useRef(Date.now());
   /** Last stream activity (tool call / user message); gates idle variety. */
   const lastStreamActivityRef = useRef(0);
-  /** Last user message the keyword layer reacted to. */
-  const lastKeywordUserAtRef = useRef(0);
+  /**
+   * Per-agent baseline for the keyword layer: the newest `userAt` already reacted
+   * to.
+   *
+   * A single global timestamp was wrong in both directions. Going A -> B -> A
+   * replayed A's old message as if it were new (its timestamp differed from B's, so
+   * the dedupe missed it); and a genuinely new message could be skipped if its
+   * timestamp happened to match. Keying on the agent makes "new" mean "this agent's
+   * newest message advanced".
+   */
+  const lastKeywordUserAtByAgentRef = useRef(new Map<string, number>());
   /** Set on the open -> closed turn edge; the module shows success for 2s. */
   const successAtRef = useRef(0);
   /** Set on a fresh user message / attention rising edge (6s curious window). */
   const curiousAtRef = useRef(0);
-  const previousTurnOpenRef = useRef(false);
-  const previousRequiresAttentionRef = useRef(false);
+  /**
+   * Edge baselines, tagged with the agent they belong to.
+   *
+   * A bare boolean is not enough: switching from a running agent A to an idle
+   * agent B looks like "turn was open, now closed" and fired a spurious success,
+   * and the same for attention. The id makes an agent change rebuild the baseline
+   * silently instead of producing an edge.
+   */
+  const previousTurnOpenRef = useRef<{ agentId: string | null; open: boolean }>({
+    agentId: null,
+    open: false,
+  });
+  const previousRequiresAttentionRef = useRef<{ agentId: string | null; requiring: boolean }>({
+    agentId: null,
+    requiring: false,
+  });
   /** Previous todo baseline: whose list it was and how far it had got. */
   const previousTodoRef = useRef<{ agentId: string; completed: number } | null>(null);
 
   // Success is an *edge*: the active turn going open -> closed (the previous
   // implementation watched a `done` bucket that was already true at launch and
   // then stayed true, so the success standee was effectively unreachable).
+  // Scoped to one agent: an agent change only rebuilds the baseline.
   useEffect(() => {
-    const wasOpen = previousTurnOpenRef.current;
-    previousTurnOpenRef.current = activity.turnOpen;
-    if (wasOpen && !activity.turnOpen) successAtRef.current = Date.now();
-  }, [activity.turnOpen]);
+    const previous = previousTurnOpenRef.current;
+    previousTurnOpenRef.current = { agentId: activity.agentId, open: activity.turnOpen };
+    if (previous.agentId !== activity.agentId) return;
+    if (previous.open && !activity.turnOpen) successAtRef.current = Date.now();
+  }, [activity.agentId, activity.turnOpen]);
 
-  // Curiosity is an *edge* too: the agent starting to require attention.
+  // Curiosity is an *edge* too: the agent starting to require attention, again
+  // scoped to one agent.
   useEffect(() => {
-    const wasRequiring = previousRequiresAttentionRef.current;
-    previousRequiresAttentionRef.current = activity.requiresAttention;
-    if (activity.requiresAttention && !wasRequiring) curiousAtRef.current = Date.now();
-  }, [activity.requiresAttention]);
+    const previous = previousRequiresAttentionRef.current;
+    previousRequiresAttentionRef.current = {
+      agentId: activity.agentId,
+      requiring: activity.requiresAttention,
+    };
+    if (previous.agentId !== activity.agentId) return;
+    if (activity.requiresAttention && !previous.requiring) curiousAtRef.current = Date.now();
+  }, [activity.agentId, activity.requiresAttention]);
 
   // A completed todo step swaps in a celebration standee. Only real forward
   // progress inside one agent's own list counts: a fresh list (first hydration)
@@ -657,13 +745,23 @@ export function PetOverlay() {
 
   // A new user message: react to what was said (keyword standee, or a random
   // meme when nothing matched) and reset the idle-variety layer.
+  //
+  // Deduped per agent. The first sighting of an agent counts as "new" only
+  // when its message is recent: switching to a conversation whose newest message is
+  // hours old must not replay a reaction, while switching to one the user just
+  // typed into should.
   useEffect(() => {
-    if (activity.userAt <= 0 || activity.userAt === lastKeywordUserAtRef.current) return;
-    lastKeywordUserAtRef.current = activity.userAt;
+    const agentId = activity.agentId;
+    if (agentId === null || activity.userAt <= 0) return;
+    const baselines = lastKeywordUserAtByAgentRef.current;
+    const previous = baselines.get(agentId);
+    if (previous !== undefined && activity.userAt <= previous) return;
+    baselines.set(agentId, activity.userAt);
     lastStreamActivityRef.current = Math.max(lastStreamActivityRef.current, activity.userAt);
     idleRandomRef.current = null;
     // Timeline hydration on launch replays old messages; a two-day-old "晚安"
-    // must not put her to bed the moment the app opens.
+    // must not put her to bed the moment the app opens. A first sighting of an
+    // agent uses the same window, so a stale conversation stays quiet.
     if (Date.now() - activity.userAt > KEYWORD_TRIGGER_MAX_AGE_MS) return;
     // The user just spoke to this conversation: a rising edge for curiosity.
     curiousAtRef.current = Date.now();
@@ -673,7 +771,7 @@ export function PetOverlay() {
       pose: matched ?? pickRandomMemePose(),
       at: Date.now(),
     };
-  }, [activity.userAt, activity.keywordId]);
+  }, [activity.agentId, activity.userAt, activity.keywordId]);
 
   // Tool activity is not a user message, but it does mean "not idle".
   useEffect(() => {
@@ -783,12 +881,27 @@ export function PetOverlay() {
     return () => clearInterval(timer);
   }, []);
 
-  // Motion drivers. `breathe` and `sway` loop forever; `hop` and `poseIn` are
-  // one-shots retriggered by a tap or a pose change.
+  // Motion drivers. `breathe` and `sway` loop forever; `hop` is a one-shot
+  // retriggered by a tap. A pose change is a cross-fade inside the `Image`, not a
+  // transform on this view, so there is no third one-shot here any more.
   const breathe = useSharedValue(0);
   const sway = useSharedValue(0);
   const hop = useSharedValue(0);
-  const poseIn = useSharedValue(1);
+  /**
+   * A 0 -> 1 "settle" that eases the idle damping while she hangs off any edge.
+   *
+   * It used to switch instantly, so landing and leaving both snapped. The
+   * breathing and the sway read it together; the bottom peek's shrink has its own
+   * weight below.
+   */
+  const peekWeight = useSharedValue(0);
+  /**
+   * The bottom peek's own 0 -> 1 settle, for its 90% shrink.
+   *
+   * Separate from `peekWeight` because only the bottom peek shrinks: driving the
+   * scale off the shared weight shrank the side peeks too.
+   */
+  const bottomWeight = useSharedValue(0);
 
   const x = useSharedValue(0);
   const y = useSharedValue(0);
@@ -801,11 +914,8 @@ export function PetOverlay() {
   // having to un-bake a shift out of the saved coordinates.
   const shiftX = useSharedValue(0);
   const shiftY = useSharedValue(0);
-  // 0 while full-body, 1 while peeking. Dampens the idle loops (see `petStyle`):
-  // a ledge that breathes and tilts stops looking attached to the composer.
-  const peekWeight = useSharedValue(0);
   /** Which edge the drag started from, so the drop handler can tell a pull-away from a nudge. */
-  const dragStartEdge = useSharedValue<"left" | "right" | "bottom" | null>(null);
+  const dragStartEdge = useSharedValue<PeekEdge | null>(null);
   /**
    * Whether `onEnd` already placed the cell.
    *
@@ -815,50 +925,108 @@ export function PetOverlay() {
    * standee up to a threshold away from the edge it just attached to.
    */
   const dragSettled = useSharedValue(false);
+  /**
+   * The keyboard-driven clamp, in points.
+   *
+   * The pet layer rides the composer's translation (see `petTranslation`), so
+   * opening the keyboard moves the pet *up* and one parked near the top would leave
+   * the window. It goes back to zero when the keyboard closes, which puts the pet
+   * back where the user left her with no remembered "pre-keyboard" position that
+   * could go stale.
+   *
+   * It follows `keyboard/shift`'s `shift`, not `layoutShift`: `layoutShift` keeps
+   * the opening reservation until the closing motion has ended, so a clamped pet
+   * would ride down with the layer and pop back up afterwards.
+   *
+   * `shift` behaves differently per platform (`react-native-keyboard-controller`
+   * writes its Reanimated values on `onKeyboardMoveStart` on iOS and on every
+   * `onKeyboardMove` on Android). On Android it is the per-frame driver the layer
+   * itself rides, so the clamp is assigned directly. On iOS it jumps to the target
+   * when the motion starts while the layer animates on the native driver, so the
+   * clamp springs there instead — see `IOS_KEYBOARD_SPRING`.
+   *
+   * The raw shift is then converted to the pet layer's own lift
+   * (`resolvePetLayerLift`), because a centered dock lifts its form by
+   * `shift - bottomClearance` and a layer with no claim does not move at all.
+   */
+  const { shift: keyboardShift } = useKeyboardShift();
+  const keyboardClamp = useSharedValue(0);
+  /**
+   * The lift the clamp was computed against.
+   *
+   * The clamp is a function of both the keyboard and where the pet currently is, so
+   * it is recomputed when either moves: the keyboard's own motion, and the end of a
+   * drag or settle (a pet dragged up while the keyboard is open must not be pushed
+   * off the top).
+   */
+  const clampLift = useSharedValue(0);
 
-  // The composer owns the bottom of the screen and rises with the keyboard.
-  // Track the keyboard so the pet can be clamped above the input bar instead of
-  // ending up hidden behind it, and remember where she was so closing the
-  // keyboard puts her back instead of leaving her parked in the lifted spot.
-  //
-  // The lift comes from the dock's own translate graph (`useKeyboardLiftStore`),
-  // not from `Keyboard`'s `endCoordinates.height`: the dock adds the bottom safe
-  // area and a `bottomClearance` on top of that, so deriving the number here left
-  // the pet a safe-area taller than the bar she hangs from.
-  // `KeyboardTranslateView` lifts the composer by the keyboard height plus a
-  // clearance the dock reports. `endCoordinates.height` already spans the safe
-  // area, so the pet reads the event and adds only that clearance.
-  const keyboardClearance = useKeyboardClearanceStore((state) => state.clearance);
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  // The composer that owns the visible input box reports its ledge; the pet layer
+  // reproduces that composer's own keyboard translation so every coordinate here
+  // lives in the keyboard-closed frame.
+  const ledgeClaim = usePetLedgeStore(selectPetLedgeClaim);
+  const ledge = ledgeClaim?.ledge ?? null;
+  /**
+   * The `KeyboardTranslateView` props the pet layer is wrapped in.
+   *
+   * Same object the dock hands its own view, so both move on the same driver. With
+   * no composer claiming the ledge (settings, the project list) nothing translates
+   * and the pet simply stays put.
+   */
+  const petTranslation = useMemo(
+    () => ledgeClaim?.translation ?? { enabled: false, bottomClearance: 0 },
+    [ledgeClaim],
+  );
+  /**
+   * `petTranslation` for the keyboard reaction.
+   *
+   * A worklet captures a snapshot of what it closes over when the handler is first
+   * serialised, so reading the memo directly would pin the translation from the
+   * first render. The ref is the live value: the reaction re-reads it on every
+   * keyboard change, which is exactly when the claim can have moved to another
+   * composer with a different clearance.
+   */
+  const petTranslationRef = useRef(petTranslation);
+  petTranslationRef.current = petTranslation;
+
+  const bounds = useMemo(
+    () =>
+      resolveRestBounds({
+        width,
+        height,
+        size: PET_SIZE,
+        edgeMargin: EDGE_MARGIN,
+        topInset,
+        bottomInset,
+        ledge,
+      }),
+    [width, height, topInset, bottomInset, ledge],
+  );
+  const { minX, maxX, minY, maxY } = bounds;
+  /**
+   * How far a bottom peek's cell may travel sideways.
+   *
+   * A centered form does not span the screen, so without this the peek hangs in
+   * the air beside the input box instead of on it.
+   */
+  const bottomPeekX = useMemo(
+    () => resolveBottomPeekXRange({ ledge, size: PET_SIZE, minX, maxX }),
+    [ledge, minX, maxX],
+  );
+  /**
+   * Bounds and the peek range, as a shared value.
+   *
+   * The pan gesture must not be rebuilt when they change: a new gesture object
+   * mid-drag is cancelled by RNGH, which is what made a viewport change (a
+   * multi-line draft, the keyboard, a rotation) drop the pet out of the user's
+   * hand. The gesture therefore closes over this one stable value.
+   */
+  const boundsShared = useSharedValue({ minX, maxX, minY, maxY });
+  const bottomPeekXShared = useSharedValue(bottomPeekX);
   useEffect(() => {
-    const show = Keyboard.addListener("keyboardWillShow", (event) => {
-      // The composer rises by `rawHeight - bottomInset`, not by the whole
-      // `endCoordinates.height`: `KeyboardTranslateView` adds the bottom safe area
-      // back on top of the (negative) keyboard height, so the net lift stops at the
-      // home indicator. Subtracting it here is what keeps a bottom peek welded to
-      // the input bar instead of floating one safe-area above it.
-      setKeyboardHeight(event.endCoordinates.height - bottomInset + keyboardClearance);
-    });
-    const hide = Keyboard.addListener("keyboardWillHide", () => setKeyboardHeight(0));
-    return () => {
-      show.remove();
-      hide.remove();
-    };
-  }, [bottomInset, keyboardClearance]);
-  const preKeyboardYRef = useRef<number | null>(null);
-
-  const minX = EDGE_MARGIN;
-  const maxX = Math.max(EDGE_MARGIN, width - PET_SIZE - EDGE_MARGIN);
-  const minY = topInset + EDGE_MARGIN;
-  // The dock's wrapper already pads by the bottom safe area, so its measured
-  // height is the ledge's distance from the screen bottom — no `bottomInset`
-  // term here, or the inset would be counted twice. A bottom peek puts its crop
-  // line exactly on that value. Before the first measurement lands there is
-  // nothing trustworthy to clamp against, so fall back to the previous constant
-  // for a frame rather than parking her on the screen edge.
-  const composerInset = useComposerInsetStore((state) => state.inset);
-  const composerLedge = composerInset ?? FALLBACK_COMPOSER_INSET + bottomInset;
-  const maxY = Math.max(minY, height - PET_SIZE - EDGE_MARGIN - composerLedge - keyboardHeight);
+    boundsShared.value = { minX, maxX, minY, maxY };
+    bottomPeekXShared.value = bottomPeekX;
+  }, [boundsShared, bottomPeekXShared, minX, maxX, minY, maxY, bottomPeekX]);
 
   // Upstream soft set: wm-breathe (-4px over 3.4s) and wm-sway (0 -> 1.2deg / 6s).
   useEffect(() => {
@@ -873,16 +1041,6 @@ export function PetOverlay() {
       true,
     );
   }, [breathe, sway]);
-
-  // Upstream swap: 140ms press-down, change, 480ms rebound. Approximated with a
-  // single pose-in so the swap does not queue two animations per change.
-  const lastPose = useRef<PoseName>(petPose);
-  useEffect(() => {
-    if (lastPose.current === petPose) return;
-    lastPose.current = petPose;
-    poseIn.value = 0;
-    poseIn.value = withTiming(1, { duration: 260, easing: Easing.out(Easing.quad) });
-  }, [petPose, poseIn]);
 
   const persist = useCallback((nextX: number, nextY: number, edge: PeekEdge | null) => {
     // A full-body position is written without the field at all, so a build from
@@ -901,11 +1059,13 @@ export function PetOverlay() {
    * The animation side of the snap lives in shared values; this mirror exists
    * only because picking the art is a React render, not a style. A drag clears
    * it immediately (a lifted pet is full-body), and the drop sets it again.
+   *
+   * The UI-thread shared value is the truth (see `peekEdgeShared`); this is only a
+   * projection of it for the render, written from `applyPeek` and the drop
+   * handler. Nothing writes the shared value from here, so a slow JS render can
+   * never overwrite an edge the gesture already chose.
    */
   const [peekEdge, setPeekEdge] = useState<PeekEdge | null>(null);
-  /** Mirror of `peekEdge` for the layout effect, which must not depend on it. */
-  const peekEdgeRef = useRef<PeekEdge | null>(null);
-  peekEdgeRef.current = peekEdge;
   /**
    * The edge, in a form the gesture worklets can actually read.
    *
@@ -914,22 +1074,32 @@ export function PetOverlay() {
    * first serialised — which is `null`, before any drop. Writing the ref later
    * never reaches it, which silently killed every branch that asked "did this
    * drag start on an edge".
+   *
+   * This is the single source of truth for the edge. JS state mirrors it one-way
+   * for the standee choice; the effect that used to write *back* into it is gone,
+   * because it could land after `onEnd` had already set a new edge and overwrite
+   * it with a stale `null`.
    */
   const peekEdgeShared = useSharedValue<PeekEdge | null>(null);
-  useEffect(() => {
-    peekEdgeShared.value = peekEdge;
-  }, [peekEdge, peekEdgeShared]);
+  /** Drop the peek on the JS side too, without touching the shared truth. */
   const clearPeek = useCallback(() => setPeekEdge(null), []);
 
-  /** Move the cell + art to `edge`'s resting position, without a drag. */
+  /**
+   * Apply an edge without a drag: restore, and any path that re-settles the cell.
+   *
+   * The weights are animated rather than assigned so the bottom peek's 90% scale
+   * and the idle damping arrive with the cell instead of snapping.
+   */
   const applyPeek = useCallback(
     (edge: PeekEdge | null, nextX: number, nextY: number) => {
       const shift = peekShift(edge, PET_SIZE, EDGE_MARGIN);
       shiftX.value = shift.x;
       shiftY.value = shift.y;
-      peekWeight.value = edge === null ? 0 : 1;
+      peekWeight.value = withTiming(edge === null ? 0 : 1, { duration: SETTLE_MS });
+      bottomWeight.value = withTiming(edge === "bottom" ? 1 : 0, { duration: SETTLE_MS });
       x.value = nextX;
       y.value = nextY;
+      peekEdgeShared.value = edge;
       setPeekEdge(edge);
     },
     // Shared values are stable identities.
@@ -938,6 +1108,11 @@ export function PetOverlay() {
   );
 
   // Restore the stored position once on mount.
+  //
+  // The record keeps its old meaning: `x`/`y` are the resting cell of a full-body
+  // pet, and `edge` names the edge she hangs from. Both are keyboard-independent —
+  // the ledge is a measured ledge in keyboard-closed space, so an old record
+  // restores onto whatever the current input box is, exactly as it did before.
   const restored = useRef(false);
   useEffect(() => {
     if (restored.current) return;
@@ -945,13 +1120,24 @@ export function PetOverlay() {
     let cancelled = false;
     void AsyncStorage.getItem(STORAGE_KEY)
       .then((raw) => {
-        if (cancelled || raw === null) return;
+        if (cancelled || raw === null) return undefined;
         // Parsing lives in `pose-map` so the upgrade path (a record written
         // before the edge feature existed) is covered by its own tests.
         const stored = parseStoredPosition(raw);
-        if (stored === null) return;
-        const resting = clampToBounds(stored, { minX, maxX, minY, maxY });
+        if (stored === null) return undefined;
+        // Read the live bounds, not this mount-time closure: the composer usually
+        // reports its ledge before storage answers, and a bottom peek restored
+        // against the pre-ledge bounds (or outside the input box's columns) would
+        // stay there, since nothing else changes afterwards to re-settle it.
+        const liveBounds = boundsShared.value;
+        const resting = snapPetToPeekEdge(
+          stored.edge,
+          clampToBounds(stored, liveBounds),
+          liveBounds,
+          bottomPeekXShared.value,
+        );
         applyPeek(stored.edge, resting.x, resting.y);
+        return undefined;
       })
       .catch(() => {
         // Unreadable storage just leaves the pet at its default corner.
@@ -959,11 +1145,19 @@ export function PetOverlay() {
     return () => {
       cancelled = true;
     };
-    // Mount-only on purpose; viewport changes are clamped by the effect below.
+    // Mount-only on purpose; viewport changes are settled by the effect below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Default corner on first layout, then re-clamp on viewport changes.
+  // Default corner on first layout, then follow the bounds when they change.
+  //
+  // A bounds change is not an assignment any more. The keyboard no longer moves
+  // `maxY` at all (the pet layer is translated with the composer instead), so what
+  // is left is a real layout change: a multi-line draft growing the input box, the
+  // attachment tray, a rotation. Assigning `x`/`y` there cancelled the settle
+  // spring that was still running and made the pet jump; a spring to the new
+  // resting point keeps a drop in flight intact and still ends up in the right
+  // place.
   const placed = useRef(false);
   useEffect(() => {
     if (!placed.current) {
@@ -972,39 +1166,68 @@ export function PetOverlay() {
       y.value = Math.min(Math.max(minY, y.value || Math.min(height * 0.62, maxY)), maxY);
       return;
     }
-    x.value = Math.min(Math.max(minX, x.value), maxX);
-    // The keyboard shift is temporary: restoring the remembered position on
-    // close keeps the pet where the user left her instead of stranding her in
-    // the lifted spot. Dragging while the keyboard is open overwrites the
-    // memory on the next open, so this cannot fight a deliberate move.
-    if (keyboardHeight > 0) {
-      // Remember the resting spot once per keyboard session so closing it puts
-      // her back where the user left her.
-      if (preKeyboardYRef.current === null) preKeyboardYRef.current = y.value;
-      y.value = Math.min(Math.max(minY, y.value), maxY);
-    } else if (preKeyboardYRef.current !== null) {
-      y.value = Math.min(Math.max(minY, preKeyboardYRef.current), maxY);
-      preKeyboardYRef.current = null;
-    } else {
-      y.value = Math.min(Math.max(minY, y.value), maxY);
-    }
-    // A peeked pet has to follow the composer: when the keyboard lifts `maxY`
-    // the ledge rises with it, and the cell has to re-snap or the art would be
-    // left hanging in mid-air. `peekShift` is viewport-independent, so only the
-    // cell moves.
-    //
-    // The edge is read through a ref, not a dependency: `setPeekEdge` runs at
-    // the end of a drop, and re-running this effect on that state change would
-    // assign `x`/`y` directly and cancel the settle spring that is still
-    // animating them.
-    const edge = peekEdgeRef.current;
-    if (edge !== null) {
-      const resting = snapToPeekEdge(edge, { x: x.value, y: y.value }, { minX, maxX, minY, maxY });
-      x.value = resting.x;
-      y.value = resting.y;
-    }
+    // A drag owns `x`/`y` while it is in flight: assigning here would fight the
+    // finger (and the drop reads the freshest `boundsShared` anyway).
+    if (draggingRef.current) return;
+    const edge = peekEdgeShared.value;
+    const resting = snapPetToPeekEdge(
+      edge,
+      clampToBounds({ x: x.value, y: y.value }, bounds),
+      bounds,
+      bottomPeekX,
+    );
+    // Both axes spring: this fires on a real layout change (a multi-line draft, the
+    // attachment tray, a rotation), and a spring keeps a settle that is still
+    // animating intact instead of snapping it. The along-the-edge axis is already
+    // inside `resting`, so the spring target *is* the clamped value — there is no
+    // separate "clamp immediately" step.
+    x.value = withSpring(resting.x, SETTLE_SPRING);
+    y.value = withSpring(resting.y, SETTLE_SPRING);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [minX, maxX, minY, maxY, height, keyboardHeight]);
+  }, [minX, maxX, minY, maxY, height, bottomPeekX]);
+
+  // Keep the keyboard clamp in step with the pet layer's own lift, on the UI
+  // thread: the reaction converts `shift` to the layer's lift and recomputes the
+  // clamp from the pet's current `y`. Nothing round-trips through React.
+  const isIos = Platform.OS === "ios";
+  useAnimatedReaction(
+    () => keyboardShift.value,
+    (rawShift) => {
+      const lift = resolvePetLayerLift({
+        shift: rawShift,
+        enabled: petTranslationRef.current.enabled,
+        bottomClearance: petTranslationRef.current.bottomClearance,
+      });
+      clampLift.value = lift;
+      const clamp = resolveKeyboardTopClamp({
+        y: y.value,
+        lift,
+        topInset,
+        edgeMargin: EDGE_MARGIN,
+      });
+      keyboardClamp.value = isIos ? withSpring(clamp, IOS_KEYBOARD_SPRING) : clamp;
+    },
+    [isIos, keyboardShift, topInset],
+  );
+  // A drag or a settle moves `y` while the keyboard may be open, so the clamp has
+  // to be recomputed for the new resting spot (a pet dragged to the top must not be
+  // shoved off it). Reading `y` per frame would defeat the point, so this fires on
+  // the discrete end of the interaction instead.
+  //
+  // It springs rather than assigns: the drop's own spring is still moving `y`, and
+  // a clamp that appeared in one frame would jump the pet ahead of it.
+  const refreshKeyboardClamp = useCallback(() => {
+    keyboardClamp.value = withSpring(
+      resolveKeyboardTopClamp({
+        y: y.value,
+        lift: clampLift.value,
+        topInset,
+        edgeMargin: EDGE_MARGIN,
+      }),
+      SETTLE_SPRING,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [topInset]);
 
   /** Play wm-hop once. */
   const playHop = useCallback(() => {
@@ -1060,9 +1283,20 @@ export function PetOverlay() {
     }
   }, []);
 
+  /**
+   * Double tap: put the newest photo into the focused draft.
+   *
+   * The result is reported instead of discarded: otherwise a missing permission or
+   * an empty library looks identical to doing nothing.
+   */
   const insertLatestPhoto = useCallback(() => {
-    void insertLatestPhotoIntoDraft(focusedDraftKeyRef.current);
-  }, []);
+    void insertLatestPhotoIntoDraft(focusedDraftKeyRef.current).then((result) => {
+      const feedback = resolvePetPhotoFeedback(result);
+      if (feedback === null) return undefined;
+      toast.show(feedback.message, { variant: feedback.variant });
+      return undefined;
+    });
+  }, [toast]);
 
   const openWorkspaceTabSwitcher = useCallback(() => {
     // Triple tap mirrors the compact header's [3] button: it opens the
@@ -1113,28 +1347,51 @@ export function PetOverlay() {
     idleRandomRef.current = null;
     // A drag is not a click: drop any pending burst count.
     resetTapBurst();
+    // Apply the pick-up standee now instead of waiting for the 500ms state-machine
+    // tick. Waiting meant the pet kept the previous standee for up to half a second
+    // after the finger had already grabbed her, and then swapped — a visible hitch
+    // at the start of every drag. `react()` already sets its own pose this way.
+    setPetPose((current) => (current === PICK_UP_POSE ? current : PICK_UP_POSE));
   }, [resetTapBurst]);
 
   const dragEnded = useCallback(() => {
     if (!draggingRef.current) return;
     draggingRef.current = false;
     dragUntilRef.current = Date.now() + PICK_UP_HOLD_MS;
-  }, []);
+    // The drop may have moved the pet while the keyboard is open, so the top clamp
+    // is recomputed for the new resting spot.
+    refreshKeyboardClamp();
+  }, [refreshKeyboardClamp]);
 
   const pan = useMemo(
     () =>
       Gesture.Pan()
         .onStart(() => {
-          // Fold the peek offset into the cell before tracking the finger. The
-          // art is drawn at `x + shiftX`, so moving the same amount from one to
-          // the other leaves it exactly where the user grabbed it — without
-          // this the standee would jump by the offset the moment the drag
-          // starts, because a dragged pet is always full-body.
+          // Fold the render offsets into the cell before tracking the finger. The
+          // art is drawn at `x + shiftX`, `y + shiftY + keyboardClamp`, so moving
+          // the same amounts from those into `x`/`y` leaves it exactly where the
+          // user grabbed it. Without this the standee jumps by the offsets the
+          // moment the drag starts (a dragged pet is always full-body, and its
+          // clamp is recomputed only after the drop).
+          //
+          // The clamp is the one that used to bite hardest: a pet held 257pt down
+          // by the keyboard would be grabbed at its rendered position, `y` would
+          // stay at the un-clamped value, and the drop would then recompute the
+          // clamp from the *new* position and fling it upward by the old amount.
           x.value = x.value + shiftX.value;
-          y.value = y.value + shiftY.value;
+          y.value = foldDragOffsets({
+            y: y.value,
+            clamp: keyboardClamp.value,
+            shiftY: shiftY.value,
+          });
           shiftX.value = 0;
           shiftY.value = 0;
-          peekWeight.value = 0;
+          keyboardClamp.value = 0;
+          // Animated, not assigned: a peek dropped within the last few hundred
+          // milliseconds is still easing its weight up, and snapping it to zero
+          // here is a visible twitch at the moment of the grab.
+          peekWeight.value = withTiming(0, { duration: SETTLE_MS });
+          bottomWeight.value = withTiming(0, { duration: SETTLE_MS });
           originX.value = x.value;
           originY.value = y.value;
           pressScale.value = withSpring(1.08, { damping: 20, stiffness: 220 });
@@ -1148,47 +1405,84 @@ export function PetOverlay() {
           y.value = originY.value + event.translationY;
         })
         .onEnd((event) => {
-          const bounds = { minX, maxX, minY, maxY };
+          // Read the bounds from the shared copy: the gesture object must not be
+          // rebuilt when they change, or RNGH cancels a drag that is in flight
+          // (a multi-line draft growing the input box is enough to do it).
+          const restBounds = boundsShared.value;
+          const peekX = bottomPeekXShared.value;
+          const startedOn = dragStartEdge.value;
+          dragStartEdge.value = null;
+          const clamped = {
+            x: Math.min(Math.max(restBounds.minX, x.value), restBounds.maxX),
+            y: Math.min(Math.max(restBounds.minY, y.value), restBounds.maxY),
+          };
           // A drag that starts on a peek edge is measured by how far it moved away
           // from that edge, not by where the clamped cell ended up. `onStart` folds
           // the peek offset into `x`, so a left peek begins the drag at x = -23.2 —
           // 33.2pt outside `minX`. Judging the absolute position there means the
           // user must pull that far before the threshold is met, which is what made
           // the pet feel stuck to the edge. Pulling `PEEK_SNAP_PX` away releases it.
-          const startedOn = dragStartEdge.value;
-          dragStartEdge.value = null;
-          // A drag that began on an edge decides between "back to that same edge"
-          // and "free": re-running the position test here would read the folded
-          // offset (`x` starts 30.75pt outside `minX`), fail the side check and
-          // report some other edge — which is what made the standee teleport.
-          const droppedX = Math.min(Math.max(minX, x.value), maxX);
-          const droppedY = Math.min(Math.max(minY, y.value), maxY);
-          const edge = resolveDragDropEdge({
+          //
+          // A free drag also takes the release velocity into account, so a flick
+          // towards an edge attaches even when it stopped short of the threshold.
+          const edge = resolveSettledDropEdge({
             startedOn,
             translationX: event.translationX,
             translationY: event.translationY,
+            velocityX: event.velocityX,
+            velocityY: event.velocityY,
             position: { x: x.value, y: y.value },
-            bounds,
+            bounds: restBounds,
             threshold: PEEK_SNAP_PX,
+            projectionMs: FLICK_PROJECTION_MS,
           });
-          const snapped = snapToPeekEdge(edge, { x: droppedX, y: droppedY }, bounds);
-          // `snapToPeekEdge` hands the raw point back when no edge matched, so the
-          // dropped-at-the-window-border case still has to be clamped. A snapped
-          // point is already one of the bounds and passes through unchanged.
-          const resting = {
-            x: Math.min(Math.max(minX, snapped.x), maxX),
-            y: Math.min(Math.max(minY, snapped.y), maxY),
-          };
+          // `snapPetToPeekEdge` clamps as well: a free drop at the window border is
+          // not on any edge, and a bottom peek is additionally kept inside the
+          // input box's columns.
+          //
+          // A free drop rests where the glide would end, not where the finger lifted.
+          // The spring carries the release velocity, so aiming it back at the lift
+          // point made a thrown pet overshoot and rubber-band back to it.
+          const resting =
+            edge === null
+              ? projectReleasePoint({
+                  position: { x: x.value, y: y.value },
+                  velocityX: event.velocityX,
+                  velocityY: event.velocityY,
+                  projectionMs: FLICK_PROJECTION_MS,
+                  bounds: restBounds,
+                })
+              : snapPetToPeekEdge(edge, clamped, restBounds, peekX);
+          // `peekShift` already compensates for the bottom peek's 90% scale, so it
+          // takes the unscaled size; passing a scaled size applied the shrink twice
+          // and left the crop line ~1.2pt above the input box.
           const shift = peekShift(edge, PET_SIZE, EDGE_MARGIN);
-          x.value = withSpring(resting.x, SETTLE_SPRING);
-          y.value = withSpring(resting.y, SETTLE_SPRING);
+          // The release velocity is handed to the spring so the settle continues the
+          // gesture instead of restarting from rest. `overshootClamping` on the axis
+          // that crosses the edge: a critically damped spring is only
+          // non-overshooting when it starts from zero velocity, and a real flick has
+          // plenty, so without the clamp the crop line would ride past the input
+          // box's top edge and come back.
+          const crossesY = edge === "bottom" || shift.y !== 0;
+          const crossesX = edge === "left" || edge === "right" || shift.x !== 0;
+          x.value = withSpring(resting.x, {
+            ...SETTLE_SPRING,
+            velocity: event.velocityX,
+            overshootClamping: crossesX,
+          });
+          y.value = withSpring(resting.y, {
+            ...SETTLE_SPRING,
+            velocity: event.velocityY,
+            overshootClamping: crossesY,
+          });
           shiftX.value = withSpring(shift.x, SETTLE_SPRING);
           shiftY.value = withSpring(shift.y, SETTLE_SPRING);
-          peekWeight.value = withTiming(edge === null ? 0 : 1, { duration: 180 });
-          // Write the shared copy here, on the UI thread, rather than waiting for
-          // the effect that mirrors `peekEdge`: a grab that lands inside the same
-          // frame would otherwise read the previous value and treat this peek as a
-          // free drag, so pulling away would not release it.
+          peekWeight.value = withTiming(edge === null ? 0 : 1, { duration: SETTLE_MS });
+          bottomWeight.value = withTiming(edge === "bottom" ? 1 : 0, { duration: SETTLE_MS });
+          // The shared value is the truth for the edge. It is written here on the
+          // UI thread, and `setPeekEdge` only mirrors it for the standee render, so
+          // a grab in the same frame reads the right answer and a slow JS render
+          // cannot overwrite it.
           peekEdgeShared.value = edge;
           dragSettled.value = true;
           runOnJS(persist)(resting.x, resting.y, edge);
@@ -1202,20 +1496,43 @@ export function PetOverlay() {
           // was already cleared, so it would stay there. `onEnd` has normally
           // already settled it; re-clamping is a no-op in that case.
           if (!dragSettled.value) {
-            const resting = settleCancelledDrag({ x: x.value, y: y.value }, peekEdgeShared.value, {
-              minX,
-              maxX,
-              minY,
-              maxY,
+            // Restore the edge the drag *started* on, not the shared value: `onEnd`
+            // can have rewritten that in this same frame, and `onStart` already
+            // cleared the JS mirror, zeroed the shift and started easing the weight
+            // to zero. Restoring the cell alone would leave the art (full-body, at
+            // weight 0) sitting on a peek's cell while the shared edge still said
+            // "hanging on the ledge". `onEnd` normally already settled it, in
+            // which case `dragSettled` is true and none of this runs.
+            const startedOn = dragStartEdge.value;
+            const resting = resolveCancelledDropResting({
+              position: { x: x.value, y: y.value },
+              startedOn,
+              bounds: boundsShared.value,
+              bottomPeekX: bottomPeekXShared.value,
             });
             x.value = withSpring(resting.x, SETTLE_SPRING);
             y.value = withSpring(resting.y, SETTLE_SPRING);
+            if (startedOn !== null) {
+              const shift = peekShift(startedOn, PET_SIZE, EDGE_MARGIN);
+              shiftX.value = withSpring(shift.x, SETTLE_SPRING);
+              shiftY.value = withSpring(shift.y, SETTLE_SPRING);
+              peekWeight.value = withTiming(1, { duration: SETTLE_MS });
+              bottomWeight.value = withTiming(startedOn === "bottom" ? 1 : 0, {
+                duration: SETTLE_MS,
+              });
+              peekEdgeShared.value = startedOn;
+              runOnJS(setPeekEdge)(startedOn);
+            } else {
+              peekWeight.value = withTiming(0, { duration: SETTLE_MS });
+            }
           }
           runOnJS(dragEnded)();
         }),
     // Shared values are stable identities; this closure only reads and writes them.
+    // The bounds deliberately travel through `boundsShared` instead of being
+    // dependencies, so a viewport change cannot rebuild the gesture mid-drag.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [minX, maxX, minY, maxY, persist, dragStarted, dragEnded, clearPeek],
+    [persist, dragStarted, dragEnded, clearPeek],
   );
 
   // Long press opens the slash-command menu. `Exclusive` gives it priority over
@@ -1250,25 +1567,37 @@ export function PetOverlay() {
     // breathes and tilts stops reading as attached to the composer bar. The
     // hop stays at full strength so pats still answer from a peek.
     const idle = 1 - peekWeight.value;
+    // No `opacity` term. The old swap dimmed the whole sprite to 20% and bounced it
+    // on every pose change; a peek draws an art set that does not change with
+    // `petPose`, so those dims fired for no visible reason (once when
+    // `PICK_UP_HOLD_MS` expired after a drop, then on every state-machine change
+    // while she hung there). The swap is a cross-fade inside the `Image` instead
+    // (see `POSE_TRANSITION`).
+    //
+    // The idle damping and the bottom peek's shrink read eased weights rather than
+    // the edge itself, so landing on an edge and leaving it no longer snap.
     return {
-      opacity: 0.2 + 0.8 * poseIn.value,
       transform: [
         { translateX: x.value + shiftX.value },
         {
           translateY:
             y.value +
-            shiftY.value -
+            shiftY.value +
+            keyboardClamp.value -
             breathe.value * BREATHE_PX * idle -
-            hop.value * HOP_PX +
-            (1 - poseIn.value) * POSE_IN_PX,
+            hop.value * HOP_PX,
         },
         { rotate: `${sway.value * 1.2 * idle}deg` },
         {
-          scale:
-            (pressScale.value *
-              (1 + (1 - poseIn.value) * 0.04) *
-              peekCellSize(peekEdgeShared.value, PET_SIZE)) /
-            PET_SIZE,
+          // Eased on `bottomWeight` rather than read off the current edge, so the
+          // bottom peek shrinks and grows continuously, side peeks never shrink, and
+          // a dragged pet is always full size even while `peekEdgeShared` still
+          // names the edge it was grabbed from.
+          scale: resolvePetSpriteScale({
+            pressScale: pressScale.value,
+            bottomWeight: bottomWeight.value,
+            bottomScale: BOTTOM_PEEK_SCALE,
+          }),
         },
       ],
     };
@@ -1292,115 +1621,66 @@ export function PetOverlay() {
   return (
     // `box-none` keeps the rest of the screen interactive: only the pet cell
     // receives touches.
-    <View pointerEvents="box-none" style={styles.host}>
-      <GestureDetector gesture={gesture}>
-        <Animated.View
-          accessibilityRole="imagebutton"
-          accessibilityLabel="Desk pet"
-          style={[styles.pet, petStyle]}
-        >
-          <Image source={standee} contentFit="contain" style={[styles.standee, styles.shadow]} />
-        </Animated.View>
-      </GestureDetector>
-      {commandMenuVisible ? (
-        <View style={[styles.menuBackdrop, { paddingBottom: bottomInset + 12 }]}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="关闭命令菜单"
-            onPress={closeCommandMenu}
-            style={styles.menuDismiss}
-          />
-          <Pressable
-            style={[
-              styles.menuSheet,
-              { backgroundColor: theme.colors.background, borderColor: theme.colors.border },
-            ]}
-            onPress={() => undefined}
+    <View pointerEvents="box-none" style={spriteStyles.host}>
+      {/*
+        The whole pet rides the owning composer's own keyboard translation: same
+        `KeyboardTranslateView` props, same driver, so a bottom peek stays welded
+        to the input box frame for frame instead of being teleported by a JS
+        keyboard event. It also means every coordinate below is in the
+        keyboard-closed frame, which is what the reported ledge is in.
+
+        With no composer claiming the ledge the translation is disabled and the
+        pet does not move at all.
+      */}
+      <KeyboardTranslateView {...petTranslation} pointerEvents="box-none" style={spriteStyles.host}>
+        <GestureDetector gesture={gesture}>
+          <Animated.View
+            accessibilityRole="imagebutton"
+            accessibilityLabel="桌宠"
+            accessibilityHint="点按互动，双击加入最新照片，三击打开标签面板，长按打开命令菜单"
+            style={[spriteStyles.pet, petStyle]}
           >
-            <Text
-              style={[
-                styles.menuTitle,
-                { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
-              ]}
-            >
-              桌宠命令（选中后填入输入框）
-            </Text>
-            {/* The daemon can report a long command list, so the sheet scrolls
-                inside a capped height instead of growing past the screen top. */}
-            <ScrollView
-              style={{ maxHeight: Math.min(height * 0.55, 420) }}
-              contentContainerStyle={styles.menuScrollContent}
-              showsVerticalScrollIndicator
-            >
-              {slashCommands.map((command) => {
-                const Icon = iconForCommand(command.name);
-                // The row scrolls, so the ScrollView has to own the gesture: a
-                // Pressable wrapping it would swallow the horizontal drag before
-                // the scroll view ever sees it. The Pressable therefore sits
-                // inside, sized to the content it is meant to activate.
-                return (
-                  <ScrollView
-                    horizontal
-                    key={command.name}
-                    showsHorizontalScrollIndicator={false}
-                    style={styles.menuItemScroll}
-                  >
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel={`${command.label}：填入 ${command.insert}`}
-                      onPress={() => selectSlashCommand(command)}
-                      style={({ pressed }) => [
-                        styles.menuItem,
-                        pressed ? { backgroundColor: theme.colors.border } : null,
-                      ]}
-                    >
-                      <View style={styles.menuItemRow}>
-                        {command.source === "paseo" ? (
-                          <Image
-                            source={PASEO_MARK}
-                            style={styles.menuItemMark}
-                            contentFit="contain"
-                          />
-                        ) : (
-                          <DshIcon size={16} />
-                        )}
-                        <Text
-                          style={[
-                            styles.menuItemLabel,
-                            { color: theme.colors.foreground, fontSize: theme.fontSize.content },
-                          ]}
-                        >
-                          {command.label}
-                        </Text>
-                      </View>
-                    </Pressable>
-                  </ScrollView>
-                );
-              })}
-            </ScrollView>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="关闭命令菜单"
-              onPress={closeCommandMenu}
-              style={styles.menuItem}
-            >
-              <Text
-                style={[
-                  styles.menuCancelLabel,
-                  { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.content },
-                ]}
-              >
-                取消
-              </Text>
-            </Pressable>
-          </Pressable>
-        </View>
-      ) : null}
+            {/*
+              `transition` cross-fades the swap instead of fading the sprite out
+              and back in: the old whole-view fade to 20% read as a flicker, and
+              it fired for poses a peeked pet does not even draw.
+            */}
+            <Image
+              source={standee}
+              contentFit="contain"
+              transition={POSE_TRANSITION}
+              style={[spriteStyles.standee, spriteStyles.shadow]}
+            />
+          </Animated.View>
+        </GestureDetector>
+      </KeyboardTranslateView>
+      <PetCommandMenu
+        visible={commandMenuVisible}
+        commands={slashCommands}
+        onSelect={selectSlashCommand}
+        onClose={closeCommandMenu}
+        bottomInset={bottomInset}
+        windowHeight={height}
+      />
     </View>
   );
 }
 
-const styles = StyleSheet.create({
+/**
+ * Plain React Native styles for the sprite itself, plus Unistyles for the one
+ * themed surface (the slash-command sheet).
+ *
+ * `docs/unistyles.md` bans `useUnistyles()`: the hook subscribes the whole overlay
+ * to every Unistyles runtime change, and it returned a fresh `theme` object each
+ * cycle, which re-rendered the pet (and every `useMemo` that took a theme value)
+ * on unrelated changes. A `StyleSheet.create((theme) => ...)` factory is tracked by
+ * the Babel plugin instead, so the sheet follows the theme with no React render.
+ *
+ * The sprite styles stay in a plain `StyleSheet.create`: they land on a Reanimated
+ * view, which must not carry theme-driven Unistyles (same doc), and nothing in
+ * them is themed.
+ */
+const spriteStyles = StyleSheet.create({
   host: {
     ...StyleSheet.absoluteFill,
   },
@@ -1421,53 +1701,5 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.22,
     shadowRadius: 8,
-  },
-  // Slash-command sheet (long press). Plain views on purpose: the pet overlay
-  // must not depend on a specific screen's bottom-sheet provider. Colours come
-  // from the app theme at the call site so the sheet matches the rest of Paseo,
-  // including light mode.
-  menuBackdrop: {
-    ...StyleSheet.absoluteFill,
-    justifyContent: "flex-end",
-    backgroundColor: "rgba(0, 0, 0, 0.35)",
-  },
-  menuDismiss: {
-    ...StyleSheet.absoluteFill,
-  },
-  menuSheet: {
-    marginHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 16,
-    borderWidth: 1,
-  },
-  menuTitle: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-  },
-  menuScrollContent: {
-    paddingBottom: 4,
-  },
-  menuItem: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-  },
-  menuItemRow: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 8,
-  },
-  menuItemMark: {
-    width: 16,
-    height: 16,
-    marginTop: 2,
-  },
-  menuItemScroll: {
-    flexGrow: 0,
-  },
-  menuItemLabel: {
-    flexShrink: 0,
-  },
-  menuCancelLabel: {
-    textAlign: "center",
   },
 });

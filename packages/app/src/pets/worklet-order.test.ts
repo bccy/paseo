@@ -4,7 +4,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 /**
- * Guards the worklet definition order in `pose-map.ts`.
+ * Guards the worklet definition order in the pet modules that run on the UI thread
+ * (`pose-map.ts` and `ledge.ts`).
  *
  * The worklet compiler turns every `"worklet"` function into a factory that runs
  * at its definition site and snapshots the values it closes over:
@@ -23,17 +24,17 @@ import { resolve } from "node:path";
  * and leaves ordinary hoisted functions, so no behavioural test can see this. This
  * one compiles the file the way Metro does and reads the output.
  */
-const SOURCE = resolve(__dirname, "pose-map.ts");
+const SOURCES = ["pose-map.ts", "ledge.ts"] as const;
 
 interface WorkletDefinition {
   readonly name: string;
   readonly at: number;
 }
 
-function compileWithWorklets(): string {
-  const code = readFileSync(SOURCE, "utf8");
+function compileWithWorklets(source: string): string {
+  const code = readFileSync(source, "utf8");
   const result = transformSync(code, {
-    filename: SOURCE,
+    filename: source,
     // `platform` is honoured by babel-preset-expo at runtime but is not part of
     // Babel's `TransformCaller` type.
     caller: { name: "metro", platform: "ios", isDev: false, isServer: false } as never,
@@ -68,8 +69,8 @@ function closureNames(compiled: string, definition: WorkletDefinition): string[]
     .filter((entry) => entry.length > 0);
 }
 
-describe("worklet definition order", () => {
-  const compiled = compileWithWorklets();
+describe.each(SOURCES)("worklet definition order in %s", (file) => {
+  const compiled = compileWithWorklets(resolve(__dirname, file));
   const definitions = workletDefinitions(compiled);
   const positionOf = new Map(definitions.map((d) => [d.name, d.at]));
 

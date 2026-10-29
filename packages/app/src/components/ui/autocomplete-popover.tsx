@@ -5,9 +5,16 @@ import {
   useRef,
   useState,
   type ReactElement,
+  type RefObject,
   type ReactNode,
 } from "react";
-import { View, useWindowDimensions, type StyleProp, type ViewStyle } from "react-native";
+import {
+  View,
+  useWindowDimensions,
+  type LayoutChangeEvent,
+  type StyleProp,
+  type ViewStyle,
+} from "react-native";
 import { Portal } from "@gorhom/portal";
 import Animated, { useAnimatedReaction, useAnimatedStyle } from "react-native-reanimated";
 import { scheduleOnRN } from "react-native-worklets";
@@ -23,6 +30,23 @@ import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 
 const OFFSET_FROM_ANCHOR = SPACING[3];
 
+/**
+ * Run two layout handlers for one view.
+ *
+ * The anchor has its own remeasure and may also be another owner's measurement
+ * target (the desk pet's ledge). Composing them here keeps the caller from having
+ * to wrap the element in a second view just to get a second `onLayout`.
+ */
+function composeLayout(
+  first: (event: LayoutChangeEvent) => void,
+  second: (event: LayoutChangeEvent) => void,
+): (event: LayoutChangeEvent) => void {
+  return (event) => {
+    first(event);
+    second(event);
+  };
+}
+
 interface RelativeAnchorRect {
   x: number;
   y: number;
@@ -34,6 +58,13 @@ interface AutocompletePopoverProps {
   visible: boolean;
   children: ReactNode;
   anchorStyle?: StyleProp<ViewStyle>;
+  /**
+   * The anchor element, exposed so another owner can measure it. It is the column
+   * that starts at the bordered input box, which is what the desk pet hangs from.
+   */
+  anchorRef?: RefObject<View | null>;
+  /** Fired on the anchor's layout, in addition to the popover's own remeasure. */
+  onAnchorLayout?: (event: LayoutChangeEvent) => void;
   options: readonly AutocompleteOption[];
   selectedIndex: number;
   onSelect: (option: AutocompleteOption) => void;
@@ -47,6 +78,8 @@ export function AutocompletePopover({
   visible,
   children,
   anchorStyle,
+  anchorRef: externalAnchorRef,
+  onAnchorLayout,
   options,
   selectedIndex,
   onSelect,
@@ -58,6 +91,15 @@ export function AutocompletePopover({
   "use no memo";
   // React Compiler memoizes effect captures by reading SharedValue.value during render.
   const anchorRef = useRef<View>(null);
+  // Mirror the element into the caller's ref: a callback ref (not an effect) so the
+  // external owner has it before the first layout, when its first measurement runs.
+  const setAnchorElement = useCallback(
+    (element: View | null) => {
+      anchorRef.current = element;
+      if (externalAnchorRef !== undefined) externalAnchorRef.current = element;
+    },
+    [anchorRef, externalAnchorRef],
+  );
   const [relativeAnchorRect, setRelativeAnchorRect] = useState<RelativeAnchorRect | null>(null);
   const windowDimensions = useWindowDimensions();
   const safeAreaInsets = useSafeAreaInsets();
@@ -144,7 +186,12 @@ export function AutocompletePopover({
 
   // The translate view is the popover's own frame, so it lifts only the popover.
   return (
-    <View ref={anchorRef} onLayout={remeasure} style={anchorStyle} collapsable={false}>
+    <View
+      ref={setAnchorElement}
+      onLayout={onAnchorLayout === undefined ? remeasure : composeLayout(remeasure, onAnchorLayout)}
+      style={anchorStyle}
+      collapsable={false}
+    >
       {children}
       {showPopover ? (
         <Portal hostName={portalHostName}>
