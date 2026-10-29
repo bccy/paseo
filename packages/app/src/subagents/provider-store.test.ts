@@ -573,6 +573,26 @@ describe("projected child history", () => {
     stream(5, "E");
     expect(text()).toBe("ABCDE");
   });
+  test("merges consecutive live reasoning deltas into one thought before a cursor exists", () => {
+    for (const [index, delta] of ["First", "Second", "Third"].entries()) {
+      useProviderSubagentStore.getState().applyUpdate(SERVER_ID, {
+        kind: "timeline",
+        parentAgentId: PARENT_ID,
+        subagentId: SUBAGENT_ID,
+        provider: "codex",
+        epoch: "e",
+        seq: index + 1,
+        timestamp,
+        item: { type: "reasoning", text: delta },
+      });
+    }
+
+    const thoughts = [...current().tail, ...current().head].filter(
+      (item) => item.kind === "thought",
+    );
+    expect(thoughts).toHaveLength(1);
+    expect(thoughts[0]).toMatchObject({ kind: "thought", text: "FirstSecondThird" });
+  });
   test("reconciles a tail snapshot racing newer live text", () => {
     stream(1, "A");
     stream(2, "B");

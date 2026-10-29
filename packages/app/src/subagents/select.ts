@@ -71,6 +71,40 @@ function toSubagentRow(agent: Agent): SubagentRow {
   };
 }
 
+/**
+ * Rows that need the user come first, then failures, then work in flight, then the settled
+ * ones. Within a band the newest sits on top, so a subagent that just started is visible
+ * without scrolling.
+ *
+ * `requiresAttention` outranks the status because a row waiting on a permission answer looks
+ * idle from `status` alone.
+ */
+const SUBAGENT_ATTENTION_RANK = 0;
+const SUBAGENT_FAILED_RANK = 1;
+const SUBAGENT_ACTIVE_RANK = 2;
+const SUBAGENT_SETTLED_RANK = 3;
+
+/**
+ * The two row kinds spell the same situation differently: managed agents use
+ * `AgentLifecycleStatus` (`initializing | idle | running | error | closed`) while provider
+ * subagents use `running | completed | failed | canceled`. Both spellings are checked so the
+ * rank holds even when a row arrives without `requiresAttention` set. Provider rows currently
+ * derive it from `status === "failed"`, which makes the extra literal defence rather than the
+ * main path — a mutation that drops it alone survives, so the provider test pins the pair.
+ */
+function subagentStatusRank(row: SubagentRow): number {
+  if (row.requiresAttention) return SUBAGENT_ATTENTION_RANK;
+  if (row.status === "error" || row.status === "failed") return SUBAGENT_FAILED_RANK;
+  if (row.status === "running" || row.status === "initializing") return SUBAGENT_ACTIVE_RANK;
+  return SUBAGENT_SETTLED_RANK;
+}
+
+function compareSubagentRows(left: SubagentRow, right: SubagentRow): number {
+  const byRank = subagentStatusRank(left) - subagentStatusRank(right);
+  if (byRank !== 0) return byRank;
+  return right.createdAt.getTime() - left.createdAt.getTime();
+}
+
 export function selectSubagentsForParent(
   state: SessionStoreSnapshot,
   params: SelectSubagentsParams,
@@ -95,7 +129,7 @@ export function selectSubagentsForParent(
     return EMPTY_SUBAGENT_ROWS;
   }
 
-  rows.sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
+  rows.sort(compareSubagentRows);
   return rows;
 }
 
@@ -164,7 +198,7 @@ export function selectProviderSubagentsForParent(
       createdAt: new Date(subagent.createdAt),
     });
   }
-  rows.sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
+  rows.sort(compareSubagentRows);
   return rows;
 }
 
@@ -201,7 +235,7 @@ export function useSubagentsForParent(params: SelectSubagentsParams): SubagentRo
     if (params.providerParentSubagentId) return providerRows;
     if (providerRows.length === 0) return paseoRows;
     const rows = [...paseoRows, ...providerRows];
-    rows.sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
+    rows.sort(compareSubagentRows);
     return rows;
   }, [params.providerParentSubagentId, paseoRows, providerRows]);
 }

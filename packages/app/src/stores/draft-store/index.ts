@@ -53,13 +53,35 @@ interface DraftStoreActions {
     draftKey: string;
     attachment: WorkspaceFileComposerAttachment;
   }) => Promise<void>;
+  /**
+   * Ask the mounted composer to replace its text. The native input is
+   * uncontrolled and only reacts to `textReplacement`, so writing the draft text
+   * alone would not show up until the composer remounts.
+   */
+  requestTextInsert: (input: { draftKey: string; text: string }) => void;
+  /**
+   * Mark one text-insert request as applied and drop it. The applied revision
+   * lives in the store (runtime state) so a remounted composer does not replay a
+   * stale request over whatever the user has typed since.
+   */
+  consumeTextInsertRequest: (input: { draftKey: string; revision: number }) => void;
   getCreateModalDraft: () => DraftInput | null;
   saveCreateModalDraft: (draft: DraftInput | null) => void;
   collectActiveAttachmentIds: () => string[];
 }
 
+/** Runtime-only request: insert this text into one draft's mounted composer. */
+export interface TextInsertRequest {
+  /** Monotonic per draft; the composer applies each revision exactly once. */
+  revision: number;
+  text: string;
+}
+
 interface DraftStoreRuntimeState {
   attachmentFocusRequestByDraftKey: Record<string, number>;
+  textInsertRequestByDraftKey: Record<string, TextInsertRequest>;
+  /** Highest text-insert revision already applied, per draft. */
+  appliedTextInsertRevisionByDraftKey: Record<string, number>;
 }
 
 type DraftStore = DraftStoreState & DraftStoreRuntimeState & DraftStoreActions;
@@ -256,6 +278,8 @@ export const useDraftStore = create<DraftStore>()(
       drafts: {},
       createModalDraft: null,
       attachmentFocusRequestByDraftKey: {},
+      textInsertRequestByDraftKey: {},
+      appliedTextInsertRevisionByDraftKey: {},
 
       getDraftInput: (draftKey) => {
         const record = get().drafts[draftKey];
@@ -398,6 +422,44 @@ export const useDraftStore = create<DraftStore>()(
           };
         });
         scheduleAttachmentGc();
+      },
+
+      consumeTextInsertRequest: ({ draftKey, revision }) => {
+        set((state) => {
+          const current = state.textInsertRequestByDraftKey[draftKey];
+          // A newer request may have replaced this one; leave it for the composer.
+          if (!current || current.revision !== revision) {
+            return state;
+          }
+          const textInsertRequestByDraftKey = { ...state.textInsertRequestByDraftKey };
+          delete textInsertRequestByDraftKey[draftKey];
+          return {
+            textInsertRequestByDraftKey,
+            appliedTextInsertRevisionByDraftKey: {
+              ...state.appliedTextInsertRevisionByDraftKey,
+              [draftKey]: revision,
+            },
+          };
+        });
+      },
+
+      requestTextInsert: ({ draftKey, text }) => {
+        set((state) => {
+          const current = state.textInsertRequestByDraftKey[draftKey];
+          const applied = state.appliedTextInsertRevisionByDraftKey[draftKey] ?? 0;
+          return {
+            textInsertRequestByDraftKey: {
+              ...state.textInsertRequestByDraftKey,
+              [draftKey]: {
+                // Consumed requests are deleted, so the applied revision has to
+                // be part of the monotonic base — otherwise the next request
+                // would restart at 1 and be skipped as "already applied".
+                revision: Math.max(current?.revision ?? 0, applied) + 1,
+                text,
+              },
+            },
+          };
+        });
       },
 
       getCreateModalDraft: () => {

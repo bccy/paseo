@@ -9,6 +9,8 @@ import {
 export interface FocusedChatTarget {
   tabId: string;
   draftKey: string;
+  /** The agent this chat belongs to; null for a draft that has no agent yet. */
+  agentId: string | null;
 }
 
 function resolveChatTab(
@@ -19,6 +21,7 @@ function resolveChatTab(
     return {
       tabId: tab.tabId,
       draftKey: buildDraftStoreKey({ serverId, agentId: tab.target.agentId }),
+      agentId: tab.target.agentId,
     };
   }
   if (tab?.target.kind === "draft") {
@@ -29,6 +32,7 @@ function resolveChatTab(
         agentId: tab.tabId,
         draftId: tab.target.draftId,
       }),
+      agentId: null,
     };
   }
   return null;

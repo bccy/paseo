@@ -33,6 +33,7 @@ import { AddProjectFlowHost } from "@/components/add-project-flow-host";
 import { WorktreeSetupCalloutSource } from "@/components/worktree-setup-callout-source";
 import { DownloadToast } from "@/components/download-toast";
 import { QuittingOverlay } from "@/components/quitting-overlay";
+import { PetOverlay } from "@/components/pet-overlay";
 import { KeyboardShortcutsDialog } from "@/components/keyboard-shortcuts-dialog";
 import { ChangelogHost } from "@/changelog";
 import { AppDiagnosticHost } from "@/components/app-diagnostic-host";
@@ -503,6 +504,7 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
         <AppDiagnosticHost />
         <ChangelogHost />
         <QuittingOverlay />
+        <PetOverlay />
       </AppearanceStyleBoundary>
     </View>
   );
