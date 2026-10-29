@@ -86,6 +86,7 @@ import {
   parseStoredPosition,
   BOTTOM_PEEK_SCALE,
   peekShift,
+  peekReleaseThreshold,
   peekSnapThreshold,
   pickIdleRandomPose,
   pickRandomMemePose,
@@ -151,10 +152,27 @@ const PET_SIZE = 85;
 const ART_TO_SCREEN = PET_SIZE / 512;
 
 const STORAGE_KEY = "paseo.pet.position.v1";
-/** Keep the pet clear of the very edge so nothing is clipped by the window. */
-const EDGE_MARGIN = 10;
-/** How far from an edge a drop counts as "hang her there", in points. */
+/**
+ * How far the resting *cell* stops short of an edge, in points.
+ *
+ * The cell is not what the user sees: the 512px standees carry transparent
+ * padding on every side (about 12.6pt per side at the shipped size for the
+ * default idle art, ~10.1pt for the pick-up pose drawn during a drag), so a
+ * 10pt margin here added a second invisible gap on top of the one already in
+ * the art — the pet looked like it floated ~23pt away from the edge.
+ *
+ * 2pt only keeps the drop shadow from being cut off by the window edge. Peek
+ * shifts are compensated by `peekShift`, so this value moves the full-body rest
+ * position without moving a peek's crop line.
+ */
+const EDGE_MARGIN = 2;
+/** How far from an edge a free drop counts as "hang her there", in points. */
 const PEEK_SNAP_PX = peekSnapThreshold(PET_SIZE);
+/**
+ * How far a drag that *started* on an edge must be pulled to come off it, in
+ * points. Larger than `PEEK_SNAP_PX` on purpose — see `PEEK_RELEASE_RATIO`.
+ */
+const PEEK_RELEASE_PX = peekReleaseThreshold(PET_SIZE);
 /**
  * The settle spring.
  *
@@ -164,6 +182,21 @@ const PEEK_SNAP_PX = peekSnapThreshold(PET_SIZE);
  * bounced back, which read as jitter on the input bar.
  */
 const SETTLE_SPRING = { damping: 27, stiffness: 180 } as const;
+/**
+ * How much of the release velocity the settle spring is given.
+ *
+ * Handing the spring the full velocity is what makes the settle continue the
+ * gesture instead of restarting from rest, but a critically damped spring does
+ * not stop dead where it is aimed: released with velocity `v` it still travels
+ * roughly `v / (ωn * e)` further, which at the shipped spring
+ * (`ωn = sqrt(180) ≈ 13.4`) is ~55pt for a 2000pt/s flick. That extra travel is
+ * the main reason a small nudge threw the pet across the screen — the flick
+ * projection was already accounted for separately.
+ *
+ * 0.35 keeps the direction and the sense of momentum while cutting that
+ * overtravel to ~19pt.
+ */
+const RELEASE_VELOCITY_SCALE = 0.35;
 /**
  * Duration of the non-spring transitions that belong to the same settle: the peek
  * weight (scale + idle damping) and the keyboard top clamp. Long enough to read as
@@ -177,10 +210,13 @@ const SETTLE_MS = 220;
  * `velocity * (FLICK_PROJECTION_MS / 1000)` points. The projected point is then
  * measured against the edges with the normal snap threshold, which is what makes a
  * deliberate flick attach while a slow release in the middle of the screen stays
- * put. 140ms is roughly a flick's own duration, so the projection lands about where
- * the finger was heading.
+ * put.
+ *
+ * 60ms, not 140ms. At 140ms a light 800pt/s throw glided 112pt — far enough that
+ * a pet released well inside the screen still flew to an edge. 60ms is closer to
+ * "the hand stopped, so the pet stops".
  */
-const FLICK_PROJECTION_MS = 140;
+const FLICK_PROJECTION_MS = 60;
 /**
  * The spring UIKit runs the keyboard on, for the iOS keyboard clamp.
  *
@@ -1419,9 +1455,10 @@ export function PetOverlay() {
           // A drag that starts on a peek edge is measured by how far it moved away
           // from that edge, not by where the clamped cell ended up. `onStart` folds
           // the peek offset into `x`, so a left peek begins the drag at x = -23.2 —
-          // 33.2pt outside `minX`. Judging the absolute position there means the
+          // 25.205pt outside `minX`. Judging the absolute position there means the
           // user must pull that far before the threshold is met, which is what made
-          // the pet feel stuck to the edge. Pulling `PEEK_SNAP_PX` away releases it.
+          // the pet feel stuck to the edge. Pulling `PEEK_RELEASE_PX` away releases
+          // it, which is a longer pull than the distance that attaches it.
           //
           // A free drag also takes the release velocity into account, so a flick
           // towards an edge attaches even when it stopped short of the threshold.
@@ -1434,6 +1471,7 @@ export function PetOverlay() {
             position: { x: x.value, y: y.value },
             bounds: restBounds,
             threshold: PEEK_SNAP_PX,
+            releaseThreshold: PEEK_RELEASE_PX,
             projectionMs: FLICK_PROJECTION_MS,
           });
           // `snapPetToPeekEdge` clamps as well: a free drop at the window border is
@@ -1458,21 +1496,23 @@ export function PetOverlay() {
           // and left the crop line ~1.2pt above the input box.
           const shift = peekShift(edge, PET_SIZE, EDGE_MARGIN);
           // The release velocity is handed to the spring so the settle continues the
-          // gesture instead of restarting from rest. `overshootClamping` on the axis
-          // that crosses the edge: a critically damped spring is only
-          // non-overshooting when it starts from zero velocity, and a real flick has
-          // plenty, so without the clamp the crop line would ride past the input
-          // box's top edge and come back.
+          // gesture instead of restarting from rest, scaled down because a
+          // critically damped spring adds its own overtravel on top (see
+          // `RELEASE_VELOCITY_SCALE`). `overshootClamping` on the axis that crosses
+          // the edge: a critically damped spring is only non-overshooting when it
+          // starts from zero velocity, and a real flick has plenty, so without the
+          // clamp the crop line would ride past the input box's top edge and come
+          // back.
           const crossesY = edge === "bottom" || shift.y !== 0;
           const crossesX = edge === "left" || edge === "right" || shift.x !== 0;
           x.value = withSpring(resting.x, {
             ...SETTLE_SPRING,
-            velocity: event.velocityX,
+            velocity: event.velocityX * RELEASE_VELOCITY_SCALE,
             overshootClamping: crossesX,
           });
           y.value = withSpring(resting.y, {
             ...SETTLE_SPRING,
-            velocity: event.velocityY,
+            velocity: event.velocityY * RELEASE_VELOCITY_SCALE,
             overshootClamping: crossesY,
           });
           shiftX.value = withSpring(shift.x, SETTLE_SPRING);
@@ -1492,7 +1532,7 @@ export function PetOverlay() {
           pressScale.value = withSpring(1, { damping: 20, stiffness: 220 });
           // A cancelled pan never reaches `onEnd`, so nothing has clamped the
           // cell yet: `onStart` folded the peek offset in, which leaves e.g. a
-          // left peek at x = -20.75 — outside the bounds — and the peek state
+          // left peek at x = -23.205 — outside the bounds — and the peek state
           // was already cleared, so it would stay there. `onEnd` has normally
           // already settled it; re-clamping is a no-op in that case.
           if (!dragSettled.value) {

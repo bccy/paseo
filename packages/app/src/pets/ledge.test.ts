@@ -23,7 +23,8 @@ import {
  */
 
 const SIZE = 85;
-const EDGE_MARGIN = 10;
+/** The shipped `EDGE_MARGIN` from `pet-overlay`. */
+const EDGE_MARGIN = 2;
 const WIDTH = 390;
 const HEIGHT = 844;
 const TOP_INSET = 59;
@@ -46,7 +47,7 @@ describe("resolveRestBounds", () => {
     const bounds = resolveRestBounds({ ...BASE, ledge: LEDGE });
     // maxY is the cell's top: one cell plus the margin above the ledge.
     expect(bounds.maxY).toBe(LEDGE.topY - SIZE - EDGE_MARGIN);
-    expect(bounds.maxY).toBe(844 - 120 - 85 - 10);
+    expect(bounds.maxY).toBe(844 - 120 - 85 - 2);
   });
 
   it("falls back to the screen bottom minus the safe area without a composer", () => {
@@ -133,12 +134,12 @@ describe("resolveKeyboardTopClamp", () => {
   });
 
   it("pushes the cell down by exactly the overhang", () => {
-    // y = 100, lift = 300 -> rendered top -200, floor is 69 -> clamp 269.
-    expect(resolveKeyboardTopClamp({ ...base, y: 100, lift: 300 })).toBe(269);
+    // y = 100, lift = 300 -> rendered top -200, floor is 61 -> clamp 261.
+    expect(resolveKeyboardTopClamp({ ...base, y: 100, lift: 300 })).toBe(261);
   });
 
   it("leaves a cell that still clears the top inset alone", () => {
-    // rendered top 300 - 200 = 100, floor 69: no clamp.
+    // rendered top 300 - 200 = 100, floor 61: no clamp.
     expect(resolveKeyboardTopClamp({ ...base, y: 300, lift: 200 })).toBe(0);
   });
 
@@ -157,22 +158,24 @@ describe("resolveKeyboardTopClamp", () => {
 });
 
 describe("resolveSettledDropEdge", () => {
-  // A 390x844 phone: the cell is 85pt, so the travel is x 10..295 and y 69..629.
-  const bounds = { minX: 10, maxX: 295, minY: 69, maxY: 629 };
-  const PROJECTION_MS = 140;
+  // A 390x844 phone with a ledge 120pt above the bottom: the cell is 85pt and the
+  // edge margin is 2pt, so the travel is x 2..303 and y 61..637.
+  const bounds = { minX: 2, maxX: 303, minY: 61, maxY: 637 };
+  const PROJECTION_MS = 60;
   const base = {
     translationX: 0,
     translationY: 0,
     velocityX: 0,
     velocityY: 0,
     bounds,
-    threshold: 12,
+    threshold: 6,
+    releaseThreshold: 12,
     projectionMs: PROJECTION_MS,
   } as const;
 
   it("attaches a slow free drop inside the snap distance", () => {
-    // 6pt from the bottom edge, below the 12pt threshold, essentially stationary.
-    expect(resolveSettledDropEdge({ ...base, startedOn: null, position: { x: 100, y: 623 } })).toBe(
+    // 5pt from the bottom edge, inside the 6pt attach distance, stationary.
+    expect(resolveSettledDropEdge({ ...base, startedOn: null, position: { x: 100, y: 632 } })).toBe(
       "bottom",
     );
   });
@@ -184,7 +187,7 @@ describe("resolveSettledDropEdge", () => {
   });
 
   it("does not attach on residual slow velocity in the middle of the screen", () => {
-    // R1: 30 pt/s of leftover finger motion projects only ~4pt, so the pet must
+    // R1: 30 pt/s of leftover finger motion projects only ~1.8pt, so the pet must
     // stay where it was released instead of flying to an edge.
     expect(
       resolveSettledDropEdge({
@@ -198,7 +201,7 @@ describe("resolveSettledDropEdge", () => {
   });
 
   it("does not attach on a medium sideways throw away from any edge", () => {
-    // R1: 200 pt/s over 140ms is 28pt of glide, still nowhere near an edge.
+    // R1: 200 pt/s over 60ms is 12pt of glide, still nowhere near an edge.
     expect(
       resolveSettledDropEdge({
         ...base,
@@ -210,23 +213,23 @@ describe("resolveSettledDropEdge", () => {
   });
 
   it("attaches on a fast downward flick near the bottom", () => {
-    // 2500 pt/s over 140ms is 350pt of glide: from y=400 it clamps onto maxY.
-    // 1200 pt/s (168pt) deliberately does NOT reach — the projection is a real
-    // distance, not "any downward velocity attaches".
+    // 69pt above the bottom edge. 1200 pt/s over 60ms is 72pt of glide, which
+    // clamps onto maxY; 800 pt/s (48pt) deliberately stops short — the
+    // projection is a real distance, not "any downward velocity attaches".
     expect(
       resolveSettledDropEdge({
         ...base,
         startedOn: null,
-        position: { x: 150, y: 400 },
-        velocityY: 1200,
+        position: { x: 150, y: 560 },
+        velocityY: 800,
       }),
     ).toBeNull();
     expect(
       resolveSettledDropEdge({
         ...base,
         startedOn: null,
-        position: { x: 150, y: 400 },
-        velocityY: 2500,
+        position: { x: 150, y: 560 },
+        velocityY: 1200,
       }),
     ).toBe("bottom");
   });
@@ -306,9 +309,38 @@ describe("resolveSettledDropEdge", () => {
       }),
     ).toBe("bottom");
   });
+
+  it("keeps a peek attached across a pull longer than the attach distance", () => {
+    // The two distances are independent: an 8pt pull is past the 6pt attach
+    // distance, so a *free* drop there would stay full-body, but a drag that
+    // started on the edge needs to clear the 12pt release distance to come off.
+    expect(
+      resolveSettledDropEdge({
+        ...base,
+        startedOn: "left",
+        translationX: 8,
+        position: { x: -20, y: 400 },
+      }),
+    ).toBe("left");
+  });
+
+  it("does not attach a free drop outside the attach distance but inside the release distance", () => {
+    // The other direction of the same split: 8pt from the right edge is beyond
+    // the 6pt attach distance, so the pet stays full-body even though it is well
+    // inside the 12pt a peek would need to be pulled to come off.
+    expect(
+      resolveSettledDropEdge({ ...base, startedOn: null, position: { x: 295, y: 400 } }),
+    ).toBeNull();
+    // 4pt away is inside the attach distance.
+    expect(resolveSettledDropEdge({ ...base, startedOn: null, position: { x: 299, y: 400 } })).toBe(
+      "right",
+    );
+  });
 });
 
 describe("projectReleasePoint", () => {
+  // Arbitrary travel rectangle: these cases only exercise the velocity -> points
+  // conversion and the clamping, so the numbers are not the shipped margins.
   const bounds = { minX: 10, maxX: 295, minY: 69, maxY: 629 };
 
   it("converts points per second into points of glide", () => {

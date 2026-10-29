@@ -224,6 +224,12 @@ export function projectReleasePoint(input: {
  * so a side peek begins the drag tens of points outside the bounds and the drop
  * point says nothing about intent. A free drag adds the flick on top of the position
  * test, because the flick is the more recent statement of intent.
+ *
+ * The two cases use two different distances. A free drop attaches within
+ * `threshold` (the snap distance), which the user wants short. A drag that started
+ * on an edge releases only past `releaseThreshold` (the larger release distance):
+ * attaching and detaching are separate intents, and measuring the pull with the
+ * snap distance would drop a peek as soon as the grab shifted a few points.
  */
 export function resolveSettledDropEdge(input: {
   readonly startedOn: PeekEdge | null;
@@ -234,6 +240,7 @@ export function resolveSettledDropEdge(input: {
   readonly position: { readonly x: number; readonly y: number };
   readonly bounds: PetRestBounds;
   readonly threshold: number;
+  readonly releaseThreshold: number;
   readonly projectionMs: number;
 }): PeekEdge | null {
   "worklet";
@@ -245,7 +252,7 @@ export function resolveSettledDropEdge(input: {
       translationY,
       position,
       bounds,
-      threshold,
+      threshold: input.releaseThreshold,
     });
   }
   // A free drag is judged where the glide would end, not where the finger lifted:

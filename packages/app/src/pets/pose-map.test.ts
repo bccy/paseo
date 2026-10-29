@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   PEEK_ANCHORS,
   PEEK_POSES,
+  PEEK_RELEASE_RATIO,
   PEEK_SNAP_RATIO,
   POSE_ASSETS,
   clampToBounds,
@@ -9,6 +10,7 @@ import {
   parseStoredPosition,
   BOTTOM_PEEK_SCALE,
   peekCellSize,
+  peekReleaseThreshold,
   peekShift,
   peekSnapThreshold,
   resolveDragDropEdge,
@@ -31,15 +33,22 @@ import {
  */
 
 const SIZE = 85;
-const EDGE_MARGIN = 10;
+/** The shipped `EDGE_MARGIN` from `pet-overlay`, which the shifts are measured against. */
+const EDGE_MARGIN = 2;
 /**
- * The snap distance in points, spelled out rather than derived: `SIZE * ratio`
- * would let a changed ratio keep its own test green.
+ * The snap (attach) distance in points, spelled out rather than derived:
+ * `SIZE * ratio` would let a changed ratio keep its own test green.
  *
- * 20pt is the value the device feedback settled on — a half body (38pt) meant a
- * peek only let go after a long pull.
+ * 6pt is the value the device feedback settled on — 12pt still grabbed the pet
+ * while the artwork was visibly clear of the edge.
  */
-const THRESHOLD_PT = 12;
+const THRESHOLD_PT = 6;
+/**
+ * The release distance in points, likewise spelled out. Deliberately larger than
+ * the attach distance: a peek must be pulled further to come off than a free drop
+ * needs to be to attach.
+ */
+const RELEASE_PT = 12;
 
 /**
  * The crop lines measured off the artwork's alpha channel, spelled out here on
@@ -193,6 +202,8 @@ describe("peekShift literals match PEEK_ANCHORS", () => {
 });
 
 describe("snapToPeekEdge", () => {
+  // Arbitrary travel rectangle. The assertions here are about which coordinate is
+  // moved, not about the shipped margins.
   const bounds = { minX: 10, maxX: 304, minY: 57, maxY: 694 };
 
   it("parks the cell at the edge it hangs from", () => {
@@ -327,7 +338,7 @@ describe("resolveDragDropEdge", () => {
 });
 
 describe("peekSnapThreshold", () => {
-  it("is the shipped 20pt at the shipped size", () => {
+  it("is the shipped 6pt at the shipped size", () => {
     // The number the drop handler actually gets. Pinned to an absolute value so
     // a changed ratio cannot ride along on its own derivation.
     expect(peekSnapThreshold(SIZE)).toBeCloseTo(THRESHOLD_PT, 6);
@@ -341,6 +352,27 @@ describe("peekSnapThreshold", () => {
 
   it("keeps the ratio the threshold is built from", () => {
     expect(PEEK_SNAP_RATIO * SIZE).toBeCloseTo(THRESHOLD_PT, 6);
+  });
+});
+
+describe("peekReleaseThreshold", () => {
+  it("is the shipped 12pt at the shipped size", () => {
+    // Deliberately twice the attach distance, and pinned the same way.
+    expect(peekReleaseThreshold(SIZE)).toBeCloseTo(RELEASE_PT, 6);
+  });
+
+  it("tracks the standee size", () => {
+    expect(peekReleaseThreshold(SIZE * 2)).toBeCloseTo(RELEASE_PT * 2, 6);
+  });
+
+  it("keeps the ratio the threshold is built from", () => {
+    expect(PEEK_RELEASE_RATIO * SIZE).toBeCloseTo(RELEASE_PT, 6);
+  });
+
+  it("is larger than the attach distance", () => {
+    // The split is the point: a peek must be pulled further to come off than a
+    // free drop needs to be to attach, or a nudge would tear it off the wall.
+    expect(peekReleaseThreshold(SIZE)).toBeGreaterThan(peekSnapThreshold(SIZE));
   });
 });
 

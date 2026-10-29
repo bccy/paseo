@@ -188,24 +188,57 @@ export const PEEK_ANCHORS: Readonly<Record<PeekEdge, { x: number; y: number }>> 
 };
 
 /**
- * How close the dropped cell must be to an edge to snap to it, as a fraction of
- * the pet's own size.
+ * How close a free drop must be to an edge to snap onto it, as a fraction of the
+ * pet's own size.
  *
- * Pinned to an absolute 12pt at the shipped 85pt standee rather than tuned as a
+ * Pinned to an absolute 6pt at the shipped 85pt standee rather than tuned as a
  * ratio, because the two numbers it could track disagree: the side peek artworks
  * carry 22-24pt of transparent padding per side, so their visible content is
  * under half the cell. A threshold expressed in body sizes therefore feels about
  * twice as long to pull as the number suggests.
  *
- * History: 38pt (half a body) let go only after a long pull, then 20pt, still
- * long for the same reason.
+ * History: 38pt (half a body) let go only after a long pull, then 20pt, then
+ * 12pt. On device 12pt still grabbed the pet while the artwork was visibly
+ * clear of the edge, so it is 6pt now.
+ *
+ * This is the *attach* distance only. Detaching a peek uses the larger
+ * `PEEK_RELEASE_RATIO`: attaching should be easy to reach, but a peek that lets
+ * go after the same short distance falls off on the first nudge.
  */
-export const PEEK_SNAP_RATIO = 12 / 85;
+export const PEEK_SNAP_RATIO = 6 / 85;
 
 /** The snap distance in points for a standee of `size` points. */
 export function peekSnapThreshold(size: number): number {
   "worklet";
   return size * PEEK_SNAP_RATIO;
+}
+
+/**
+ * How far a drag that started on an edge must be pulled off it, as a fraction of
+ * the pet's own size.
+ *
+ * A separate, larger distance than `PEEK_SNAP_RATIO` on purpose. The two measure
+ * different intents: snapping asks "is the drop close enough to count as hung
+ * there", which the user wants to be short; releasing asks "did the user mean to
+ * pull her off", which has to clear the slop of a grab. At the 6pt attach
+ * distance, resting a thumb on a peek and shifting a few points dropped it, so
+ * release stays at the old 12pt.
+ *
+ * Must stay declared *above* `peekReleaseThreshold`. The worklet compiler
+ * snapshots a worklet's closure at the definition site, and that applies to plain
+ * `const`s too, not only to other worklets: declared below, this constant would be
+ * read while the binding is still `undefined` (the factory is emitted as
+ * `RATIO = RATIO`, evaluated at that point), so the worklet would carry
+ * `undefined` and throw on the UI thread. `worklet-order.test.ts` only compares
+ * worklet against worklet, so it cannot catch this one — the order here is held by
+ * this comment.
+ */
+export const PEEK_RELEASE_RATIO = 12 / 85;
+
+/** The release distance in points for a standee of `size` points. */
+export function peekReleaseThreshold(size: number): number {
+  "worklet";
+  return size * PEEK_RELEASE_RATIO;
 }
 
 /** The cell rectangle the pet may rest in, in screen points. */
@@ -271,7 +304,7 @@ export function snapToPeekEdge(
  *
  * `onStart` folds the peek offset into the cell, so a cancelled pan (which never
  * reaches `onEnd`) can be holding a cell outside the bounds — a left peek lands
- * at `x = -20.75` for the shipped size. The peek state is cleared when the drag
+ * at `x = -23.205` for the shipped size. The peek state is cleared when the drag
  * begins, so nothing else will correct it.
  *
  * A still-set `edge` is re-snapped first: `clearPeek` is dispatched through
