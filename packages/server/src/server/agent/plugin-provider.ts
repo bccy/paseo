@@ -1612,6 +1612,79 @@ class PluginAgentSession implements AgentSession {
       token,
       scope,
     });
+    // A conversation rewind discards the provider's native branch, but this
+    // adapter's translated history only ever grew (the plugin contract has no
+    // removal event). `agent-manager.rewind()` re-hydrates the timeline from
+    // `streamHistory()` right after this reply, so without this the withdrawn
+    // turns come straight back.
+    //
+    // The history is not the only retained state: `mapTimelineItem()` keeps a
+    // `timelineSnapshots` entry per item id and computes the emitted text as a
+    // *diff* against it (`text.startsWith(previousText)`), and `revertTokens`
+    // maps message ids to their rewind tokens. Dropping rows alone leaves those
+    // behind, and a replacement prompt that reuses a discarded item id then
+    // diffs against a snapshot from the branch that no longer exists — the
+    // reused id emits ` revised` instead of `Reply B revised`. Everything the
+    // discarded branch registered has to go with it.
+    //
+    // `files` is excluded on purpose: a file-only rewind restores the working
+    // tree and leaves the conversation alone — the daemon skips the force
+    // hydrate for it (`agent-manager`: `if (mode !== "files")`) — so truncating
+    // here would drop rows nobody asked to remove.
+    if (scope !== "files") this.discardHistoryFrom(messageId);
+  }
+
+  /**
+   * Drop the translated history from `messageId` onwards, together with the
+   * translation state that the discarded branch registered.
+   *
+   * `history` only ever grew, so a rewind used to leave the withdrawn turns in
+   * place: `agent-manager.rewind()` re-hydrates from `streamHistory()` right
+   * after `revert()` resolves, and that generator just replays this array.
+   *
+   * Truncating the array is not enough on its own. `mapTimelineItem()` keeps one
+   * `timelineSnapshots` entry per provider item id and computes each emitted
+   * text as a *diff* against it (`text.startsWith(previousText)`), and it also
+   * fills `revertTokens` for the same ids. The translated rows in `history`
+   * carry no provider id (only user/assistant rows keep a `messageId`), so the
+   * entries belonging to the discarded branch cannot be picked out afterwards —
+   * and leaving them behind makes a replacement prompt that reuses a discarded
+   * id diff against a branch that no longer exists (the reused id emits
+   * ` revised` instead of `Reply B revised`).
+   *
+   * Both maps are therefore cleared wholesale. They are pure translation
+   * caches: `streamHistory()` replays the already-translated array and never
+   * re-runs `mapTimelineItem()`, so nothing rebuilds them. Dropping them only
+   * means the next item with a previously seen id is emitted in full instead of
+   * as a delta, which is what a rewritten branch needs. The retained rows are
+   * untouched, so their replay is unaffected.
+   *
+   * `files` rewinds never reach here: they restore the working tree and leave
+   * the conversation alone (the daemon skips the force hydrate for them —
+   * `agent-manager`: `if (mode !== "files")`).
+   *
+   * @param messageId - provider message id the rewind targets.
+   * @returns whether a history row matched (false leaves the state untouched).
+   */
+  private discardHistoryFrom(messageId: string): boolean {
+    let cut = -1;
+    for (let index = this.history.length - 1; index >= 0; index -= 1) {
+      const event = this.history[index];
+      if (event?.type !== "timeline") continue;
+      const item = event.item;
+      const id =
+        item.type === "user_message" || item.type === "assistant_message"
+          ? (item.messageId ?? undefined)
+          : undefined;
+      if (id !== messageId) continue;
+      cut = index;
+      break;
+    }
+    if (cut === -1) return false;
+    this.history.length = cut;
+    this.timelineSnapshots.clear();
+    this.revertTokens.clear();
+    return true;
   }
 
   private publish(event: AgentStreamEvent): void {
