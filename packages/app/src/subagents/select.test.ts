@@ -342,6 +342,9 @@ describe("selectSubagentsForParent", () => {
         parentAgentId: "parent",
         status: "idle",
         requiresAttention: true,
+        // A permission question is the only attention reason that means the process is stopped
+        // and waiting on an answer, which is what earns the top band.
+        attentionReason: "permission",
         createdAt: new Date("2026-03-08T10:01:00.000Z"),
       }),
       makeAgent({
@@ -374,6 +377,78 @@ describe("selectSubagentsForParent", () => {
     );
 
     expect(rows.map((row) => row.id)).toEqual(["needs-user", "failed", "active", "settled"]);
+  });
+
+  // The bug this pins: the host sets `requiresAttention` with `attentionReason: "finished"` as
+  // soon as a turn completes, so a boolean-only rank put finished rows in the same band as rows
+  // waiting on the user, and those freshly finished rows buried the row still running. The
+  // timestamps are inverted — `finished` is the newest — so a createdAt-only sort yields
+  // ["finished", "running"] too. Both the old rank and a plain newest-first sort get this wrong;
+  // only reading `attentionReason` produces the expected order.
+  it("keeps a running row above a row that only finished and awaits review", () => {
+    setAgents([
+      makeAgent({ id: "parent" }),
+      makeAgent({
+        id: "finished",
+        parentAgentId: "parent",
+        status: "idle",
+        requiresAttention: true,
+        attentionReason: "finished",
+        createdAt: new Date("2026-03-08T10:09:00.000Z"),
+      }),
+      makeAgent({
+        id: "running",
+        parentAgentId: "parent",
+        status: "running",
+        requiresAttention: false,
+        attentionReason: null,
+        createdAt: new Date("2026-03-08T10:01:00.000Z"),
+      }),
+    ]);
+
+    const rows = selectSubagentsForParent(
+      useSessionStore.getState(),
+      {
+        serverId: SERVER_ID,
+        parentAgentId: "parent",
+      },
+      EMPTY_PENDING_ARCHIVE_IDS,
+    );
+
+    expect(rows.map((row) => row.id)).toEqual(["running", "finished"]);
+  });
+
+  // A pending permission answer is a real stop, so it still outranks a running row even though
+  // the host also marks it `requiresAttention` — and it outranks it regardless of age.
+  it("keeps a permission question above a running row", () => {
+    setAgents([
+      makeAgent({ id: "parent" }),
+      makeAgent({
+        id: "running",
+        parentAgentId: "parent",
+        status: "running",
+        createdAt: new Date("2026-03-08T10:09:00.000Z"),
+      }),
+      makeAgent({
+        id: "blocked",
+        parentAgentId: "parent",
+        status: "running",
+        requiresAttention: true,
+        attentionReason: "permission",
+        createdAt: new Date("2026-03-08T10:01:00.000Z"),
+      }),
+    ]);
+
+    const rows = selectSubagentsForParent(
+      useSessionStore.getState(),
+      {
+        serverId: SERVER_ID,
+        parentAgentId: "parent",
+      },
+      EMPTY_PENDING_ARCHIVE_IDS,
+    );
+
+    expect(rows.map((row) => row.id)).toEqual(["blocked", "running"]);
   });
 
   // Provider rows spell "failed" where managed rows spell "error". Ranking must recognise both,
@@ -423,6 +498,13 @@ describe("selectSubagentsForParent", () => {
 
   it("maps only row-rendered fields and does not expose onOpen", () => {
     const createdAt = new Date("2026-03-08T10:01:00.000Z");
+    const pendingPermission: Agent["pendingPermissions"][number] = {
+      id: "permission-1",
+      provider: "claude",
+      name: "shell",
+      kind: "tool",
+      title: "Run the tests",
+    };
     setAgents([
       makeAgent({ id: "parent" }),
       makeAgent({
@@ -432,6 +514,8 @@ describe("selectSubagentsForParent", () => {
         title: "Review child",
         status: "running",
         requiresAttention: true,
+        attentionReason: "permission",
+        pendingPermissions: [pendingPermission],
         createdAt,
         model: "should-not-leak",
         cwd: "/private/project",
@@ -459,15 +543,19 @@ describe("selectSubagentsForParent", () => {
         status: "running",
         turn: { phase: "idle", cancellationRequestId: null },
         requiresAttention: true,
+        attentionReason: "permission",
+        pendingPermissionCount: 1,
         createdAt,
       },
     ]);
     expect(Object.keys(rows[0] ?? {}).sort()).toEqual([
       "address",
+      "attentionReason",
       "createdAt",
       "description",
       "id",
       "kind",
+      "pendingPermissionCount",
       "provider",
       "requiresAttention",
       "status",
@@ -478,6 +566,7 @@ describe("selectSubagentsForParent", () => {
     expect(rows[0]).not.toHaveProperty("onOpen");
     expect(rows[0]).not.toHaveProperty("model");
     expect(rows[0]).not.toHaveProperty("cwd");
+    expect(rows[0]).not.toHaveProperty("pendingPermissions");
   });
 
   it("moves a child when parentAgentId changes", () => {

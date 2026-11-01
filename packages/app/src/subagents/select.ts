@@ -1,11 +1,19 @@
 import type { AgentAddress } from "@getpaseo/protocol/addresses";
 import { getParentAddressFromLabels } from "@getpaseo/protocol/agent-labels";
+import {
+  getAgentStatusPriority,
+  type AgentStateBucketInput,
+} from "@getpaseo/protocol/agent-state-bucket";
 import { useEffect, useMemo } from "react";
 import { usePendingArchiveAgentKeys } from "@/hooks/use-archive-agent";
 import equal from "fast-deep-equal";
 import { useStoreWithEqualityFn } from "zustand/traditional";
 import { useSessionStore, type Agent } from "@/stores/session-store";
-import { refreshProviderSubagents, useProviderSubagentStore } from "./provider-store";
+import {
+  providerSubagentLifecycleStatus,
+  refreshProviderSubagents,
+  useProviderSubagentStore,
+} from "./provider-store";
 import type { ProviderSubagentDescriptorPayload } from "@getpaseo/protocol/messages";
 
 export interface PaseoSubagentRow {
@@ -20,6 +28,13 @@ export interface PaseoSubagentRow {
   status: Agent["status"];
   turn: Agent["turn"];
   requiresAttention: Agent["requiresAttention"];
+  /**
+   * Why the host flagged the row, and how many permission answers are outstanding. Ordering
+   * reads them because `requiresAttention` alone cannot tell a permission question apart from a
+   * turn that merely finished.
+   */
+  attentionReason?: Agent["attentionReason"];
+  pendingPermissionCount?: number;
   createdAt: Agent["createdAt"];
 }
 
@@ -67,40 +82,43 @@ function toSubagentRow(agent: Agent): SubagentRow {
     status: agent.status,
     turn: agent.turn,
     requiresAttention: agent.requiresAttention,
+    attentionReason: agent.attentionReason,
+    pendingPermissionCount: agent.pendingPermissions.length,
     createdAt: agent.createdAt,
   };
 }
 
 /**
- * Rows that need the user come first, then failures, then work in flight, then the settled
- * ones. Within a band the newest sits on top, so a subagent that just started is visible
+ * The band a row sorts into, taken from the protocol's own agent-state priority table: the row
+ * blocked on a permission answer first, then failures, then work in flight, then everything
+ * settled. Within a band the newest sits on top, so a subagent that just started is visible
  * without scrolling.
  *
- * `requiresAttention` outranks the status because a row waiting on a permission answer looks
- * idle from `status` alone.
+ * The band is derived from `attentionReason`, not from `requiresAttention`. The host sets that
+ * flag with `attentionReason: "finished"` the moment a turn completes, so ranking on the boolean
+ * alone put freshly finished rows in the same band as rows waiting on the user — and those rows
+ * then buried the ones still running. `getAgentStatusPriority` keys off the reason instead,
+ * which is what tells a stopped process apart from a finished one.
  */
-const SUBAGENT_ATTENTION_RANK = 0;
-const SUBAGENT_FAILED_RANK = 1;
-const SUBAGENT_ACTIVE_RANK = 2;
-const SUBAGENT_SETTLED_RANK = 3;
-
-/**
- * The two row kinds spell the same situation differently: managed agents use
- * `AgentLifecycleStatus` (`initializing | idle | running | error | closed`) while provider
- * subagents use `running | completed | failed | canceled`. Both spellings are checked so the
- * rank holds even when a row arrives without `requiresAttention` set. Provider rows currently
- * derive it from `status === "failed"`, which makes the extra literal defence rather than the
- * main path — a mutation that drops it alone survives, so the provider test pins the pair.
- */
-function subagentStatusRank(row: SubagentRow): number {
-  if (row.requiresAttention) return SUBAGENT_ATTENTION_RANK;
-  if (row.status === "error" || row.status === "failed") return SUBAGENT_FAILED_RANK;
-  if (row.status === "running" || row.status === "initializing") return SUBAGENT_ACTIVE_RANK;
-  return SUBAGENT_SETTLED_RANK;
+function subagentRankInput(row: SubagentRow): AgentStateBucketInput {
+  if (row.kind === "paseo") {
+    return {
+      status: row.status,
+      pendingPermissionCount: row.pendingPermissionCount ?? 0,
+      attentionReason: row.attentionReason ?? null,
+    };
+  }
+  // Provider rows spell their lifecycle differently — `running | completed | failed | canceled`
+  // against `initializing | idle | running | error | closed` — so `failed` has to become `error`
+  // before the shared table can read it. Provider rows carry no `attentionReason`; their
+  // `requiresAttention` is derived from the status, which is why the status alone decides.
+  return { status: providerSubagentLifecycleStatus(row.status) };
 }
 
 function compareSubagentRows(left: SubagentRow, right: SubagentRow): number {
-  const byRank = subagentStatusRank(left) - subagentStatusRank(right);
+  const byRank =
+    getAgentStatusPriority(subagentRankInput(left)) -
+    getAgentStatusPriority(subagentRankInput(right));
   if (byRank !== 0) return byRank;
   return right.createdAt.getTime() - left.createdAt.getTime();
 }
