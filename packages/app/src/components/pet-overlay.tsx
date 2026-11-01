@@ -102,7 +102,7 @@ import {
   foldDragOffsets,
   projectReleasePoint,
   resolveBottomPeekXRange,
-  resolveKeyboardTopClamp,
+  resolveKeyboardOffset,
   resolvePetLayerLift,
   resolvePetSpriteScale,
   resolveCancelledDropResting,
@@ -961,6 +961,8 @@ export function PetOverlay() {
    * standee up to a threshold away from the edge it just attached to.
    */
   const dragSettled = useSharedValue(false);
+  /** A drag is in flight, for the keyboard reaction (`draggingRef` is JS-only). */
+  const draggingShared = useSharedValue(false);
   /**
    * Where the user last put the cell: the drop, a cancelled drop, or the restore.
    *
@@ -972,13 +974,13 @@ export function PetOverlay() {
    */
   const chosen = useSharedValue<{ x: number; y: number } | null>(null);
   /**
-   * The keyboard-driven clamp, in points.
+   * The keyboard-driven offset, in points (see `resolveKeyboardOffset`).
    *
-   * The pet layer rides the composer's translation (see `petTranslation`), so
-   * opening the keyboard moves the pet *up* and one parked near the top would leave
-   * the window. It goes back to zero when the keyboard closes, which puts the pet
-   * back where the user left her with no remembered "pre-keyboard" position that
-   * could go stale.
+   * The pet layer rides the composer's translation (see `petTranslation`) so a
+   * bottom peek stays on the input box; that pet is only clamped so she cannot
+   * leave the window top. Any other pet cancels the lift and stays where the user
+   * put her on screen, rising only enough to stay above the lifted input box. It
+   * goes back to zero when the keyboard closes.
    *
    * It follows `keyboard/shift`'s `shift`, not `layoutShift`: `layoutShift` keeps
    * the opening reservation until the closing motion has ended, so a clamped pet
@@ -1234,9 +1236,9 @@ export function PetOverlay() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [minX, maxX, minY, maxY, height, bottomPeekX]);
 
-  // Keep the keyboard clamp in step with the pet layer's own lift, on the UI
+  // Keep the keyboard offset in step with the pet layer's own lift, on the UI
   // thread: the reaction converts `shift` to the layer's lift and recomputes the
-  // clamp from the pet's current `y`. Nothing round-trips through React.
+  // offset from the pet's edge and chosen `y`. Nothing round-trips through React.
   const isIos = Platform.OS === "ios";
   useAnimatedReaction(
     () => keyboardShift.value,
@@ -1247,13 +1249,21 @@ export function PetOverlay() {
         bottomClearance: petTranslationRef.current.bottomClearance,
       });
       clampLift.value = lift;
-      const clamp = resolveKeyboardTopClamp({
-        y: y.value,
+      // A drag holds the offset at the whole lift (see `onStart`); the drop
+      // recomputes it.
+      if (draggingShared.value) {
+        keyboardClamp.value = lift;
+        return;
+      }
+      const offset = resolveKeyboardOffset({
+        edge: peekEdgeShared.value,
+        y: chosen.value?.y ?? y.value,
         lift,
+        maxY: boundsShared.value.maxY,
         topInset,
         edgeMargin: EDGE_MARGIN,
       });
-      keyboardClamp.value = isIos ? withSpring(clamp, IOS_KEYBOARD_SPRING) : clamp;
+      keyboardClamp.value = isIos ? withSpring(offset, IOS_KEYBOARD_SPRING) : offset;
     },
     [isIos, keyboardShift, topInset],
   );
@@ -1266,9 +1276,11 @@ export function PetOverlay() {
   // a clamp that appeared in one frame would jump the pet ahead of it.
   const refreshKeyboardClamp = useCallback(() => {
     keyboardClamp.value = withSpring(
-      resolveKeyboardTopClamp({
-        y: y.value,
+      resolveKeyboardOffset({
+        edge: peekEdgeShared.value,
+        y: chosen.value?.y ?? y.value,
         lift: clampLift.value,
+        maxY: boundsShared.value.maxY,
         topInset,
         edgeMargin: EDGE_MARGIN,
       }),
@@ -1427,14 +1439,18 @@ export function PetOverlay() {
           // stay at the un-clamped value, and the drop would then recompute the
           // clamp from the *new* position and fling it upward by the old amount.
           x.value = x.value + shiftX.value;
+          // A dragged pet is free, so her offset becomes the whole lift: she follows
+          // the finger in screen space, keyboard open or not.
           y.value = foldDragOffsets({
             y: y.value,
             clamp: keyboardClamp.value,
             shiftY: shiftY.value,
+            lift: clampLift.value,
           });
           shiftX.value = 0;
           shiftY.value = 0;
-          keyboardClamp.value = 0;
+          keyboardClamp.value = clampLift.value;
+          draggingShared.value = true;
           // Animated, not assigned: a peek dropped within the last few hundred
           // milliseconds is still easing its weight up, and snapping it to zero
           // here is a visible twitch at the moment of the grab.
@@ -1580,6 +1596,7 @@ export function PetOverlay() {
               peekWeight.value = withTiming(0, { duration: SETTLE_MS });
             }
           }
+          draggingShared.value = false;
           runOnJS(dragEnded)();
         }),
     // Shared values are stable identities; this closure only reads and writes them.

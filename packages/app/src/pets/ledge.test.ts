@@ -3,6 +3,7 @@ import {
   foldDragOffsets,
   projectReleasePoint,
   resolveBottomPeekXRange,
+  resolveKeyboardOffset,
   resolveKeyboardTopClamp,
   resolvePetLayerLift,
   resolvePetSpriteScale,
@@ -399,11 +400,43 @@ describe("resolvePetLayerLift", () => {
 describe("foldDragOffsets", () => {
   it("folds the clamp and the peek shift into the resting y", () => {
     // A pet held 257pt down by the clamp, hanging 12.5pt off the bottom edge.
-    expect(foldDragOffsets({ y: 400, clamp: 257, shiftY: 12.5 })).toBe(669.5);
+    expect(foldDragOffsets({ y: 400, clamp: 257, shiftY: 12.5, lift: 0 })).toBe(669.5);
   });
 
   it("is the identity when nothing is offset", () => {
-    expect(foldDragOffsets({ y: 400, clamp: 0, shiftY: 0 })).toBe(400);
+    expect(foldDragOffsets({ y: 400, clamp: 0, shiftY: 0, lift: 0 })).toBe(400);
+  });
+
+  it("grabs a bottom peek where the lifted layer draws it", () => {
+    // Drawn at 400 + 12.5 - 300 (lift) + 0 (offset); a dragged pet's offset is the
+    // whole lift, so her new `y` is her drawn top.
+    expect(foldDragOffsets({ y: 400, clamp: 0, shiftY: 12.5, lift: 300 })).toBe(112.5);
+  });
+});
+
+describe("resolveKeyboardOffset", () => {
+  const base = { topInset: TOP_INSET, edgeMargin: EDGE_MARGIN, y: 300, lift: 280, maxY: 637 };
+
+  it("cancels the lift for a free-standing pet so she stays put", () => {
+    expect(resolveKeyboardOffset({ ...base, edge: null })).toBe(280);
+  });
+
+  it("cancels the lift for a side peek", () => {
+    expect(resolveKeyboardOffset({ ...base, edge: "left" })).toBe(280);
+  });
+
+  it("lets a bottom peek ride the keyboard with the input box", () => {
+    expect(resolveKeyboardOffset({ ...base, y: 637, edge: "bottom" })).toBe(0);
+  });
+
+  it("lifts a low free pet only enough to clear the lifted input box", () => {
+    // y 500, maxY 637: cancelling more than 137 would put her under the box.
+    expect(resolveKeyboardOffset({ ...base, y: 500, edge: null })).toBe(137);
+  });
+
+  it("is zero for every edge while the keyboard is closed", () => {
+    expect(resolveKeyboardOffset({ ...base, lift: 0, edge: null })).toBe(0);
+    expect(resolveKeyboardOffset({ ...base, lift: 0, edge: "bottom" })).toBe(0);
   });
 });
 

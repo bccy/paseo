@@ -136,6 +136,31 @@ export function resolveKeyboardTopClamp(input: {
 }
 
 /**
+ * The keyboard offset drawn on top of the pet layer's lift, in points.
+ *
+ * Only a pet hanging on the input box rides the keyboard: the layer is translated
+ * with the composer so the bottom peek stays on the box (the top clamp still keeps
+ * it on screen). A free-standing pet or a side peek cancels the lift and stays
+ * where the user put her. The one exception is a pet low enough that the lifted
+ * input box would cover her: she rises just far enough to stay above it.
+ *
+ * `maxY` is the lowest resting top in keyboard-closed space; the lifted box sits
+ * `lift` higher, so cancelling more than `maxY - y` would leave her under it.
+ */
+export function resolveKeyboardOffset(input: {
+  readonly edge: PeekEdge | null;
+  readonly y: number;
+  readonly lift: number;
+  readonly maxY: number;
+  readonly topInset: number;
+  readonly edgeMargin: number;
+}): number {
+  "worklet";
+  if (input.edge === "bottom") return resolveKeyboardTopClamp(input);
+  return Math.max(0, Math.min(input.lift, input.maxY - input.y));
+}
+
+/**
  * The lift the pet layer itself is translated by.
  *
  * The clamp has to use the pet layer's *own* lift, not the raw keyboard shift. Two
@@ -177,9 +202,11 @@ export function foldDragOffsets(input: {
   readonly y: number;
   readonly clamp: number;
   readonly shiftY: number;
+  /** The layer's lift; a dragged pet is free, so her offset becomes exactly this. */
+  readonly lift: number;
 }): number {
   "worklet";
-  return input.y + input.shiftY + input.clamp;
+  return input.y + input.shiftY + input.clamp - input.lift;
 }
 
 /**
