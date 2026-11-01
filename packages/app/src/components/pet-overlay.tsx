@@ -962,6 +962,16 @@ export function PetOverlay() {
    */
   const dragSettled = useSharedValue(false);
   /**
+   * Where the user last put the cell: the drop, a cancelled drop, or the restore.
+   *
+   * A bounds change re-settles from here, not from the live `x`/`y`. Bounds can
+   * shrink for a while (the input box growing, the window shrinking with the
+   * keyboard) and grow back; clamping the live position would leave a pet pushed up
+   * by the smaller bounds stuck there when they recover. `null` until the first
+   * placement, which then uses the default corner.
+   */
+  const chosen = useSharedValue<{ x: number; y: number } | null>(null);
+  /**
    * The keyboard-driven clamp, in points.
    *
    * The pet layer rides the composer's translation (see `petTranslation`), so
@@ -1172,6 +1182,7 @@ export function PetOverlay() {
           liveBounds,
           bottomPeekXShared.value,
         );
+        chosen.value = { x: stored.x, y: stored.y };
         applyPeek(stored.edge, resting.x, resting.y);
         return undefined;
       })
@@ -1200,6 +1211,7 @@ export function PetOverlay() {
       placed.current = true;
       x.value = Math.min(Math.max(minX, x.value || maxX), maxX);
       y.value = Math.min(Math.max(minY, y.value || Math.min(height * 0.62, maxY)), maxY);
+      chosen.value ??= { x: x.value, y: y.value };
       return;
     }
     // A drag owns `x`/`y` while it is in flight: assigning here would fight the
@@ -1208,7 +1220,7 @@ export function PetOverlay() {
     const edge = peekEdgeShared.value;
     const resting = snapPetToPeekEdge(
       edge,
-      clampToBounds({ x: x.value, y: y.value }, bounds),
+      clampToBounds(chosen.value ?? { x: x.value, y: y.value }, bounds),
       bounds,
       bottomPeekX,
     );
@@ -1525,6 +1537,7 @@ export function PetOverlay() {
           // cannot overwrite it.
           peekEdgeShared.value = edge;
           dragSettled.value = true;
+          chosen.value = { x: resting.x, y: resting.y };
           runOnJS(persist)(resting.x, resting.y, edge);
           runOnJS(setPeekEdge)(edge);
         })
@@ -1550,6 +1563,7 @@ export function PetOverlay() {
               bounds: boundsShared.value,
               bottomPeekX: bottomPeekXShared.value,
             });
+            chosen.value = { x: resting.x, y: resting.y };
             x.value = withSpring(resting.x, SETTLE_SPRING);
             y.value = withSpring(resting.y, SETTLE_SPRING);
             if (startedOn !== null) {
