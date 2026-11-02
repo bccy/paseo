@@ -1029,13 +1029,16 @@ export function PetOverlay() {
    * `petTranslation` for the keyboard reaction.
    *
    * A worklet captures a snapshot of what it closes over when the handler is first
-   * serialised, so reading the memo directly would pin the translation from the
-   * first render. The ref is the live value: the reaction re-reads it on every
-   * keyboard change, which is exactly when the claim can have moved to another
-   * composer with a different clearance.
+   * serialised, and that includes a `useRef` object: the UI thread keeps the
+   * `.current` from the first render, which is before any composer claims the
+   * ledge. The reaction then saw a disabled translation, computed no lift and never
+   * cancelled it, so a free pet rode up with the layer. A shared value is the live
+   * copy on the UI thread.
    */
-  const petTranslationRef = useRef(petTranslation);
-  petTranslationRef.current = petTranslation;
+  const petTranslationShared = useSharedValue(petTranslation);
+  useEffect(() => {
+    petTranslationShared.value = petTranslation;
+  }, [petTranslation, petTranslationShared]);
 
   const bounds = useMemo(
     () =>
@@ -1240,14 +1243,16 @@ export function PetOverlay() {
   // thread: the reaction converts `shift` to the layer's lift and recomputes the
   // offset from the pet's edge and chosen `y`. Nothing round-trips through React.
   const isIos = Platform.OS === "ios";
+  // The translation is part of the input: a claim that arrives or changes while
+  // the keyboard is open moves the layer too, so the offset must follow it.
   useAnimatedReaction(
-    () => keyboardShift.value,
-    (rawShift) => {
-      const lift = resolvePetLayerLift({
-        shift: rawShift,
-        enabled: petTranslationRef.current.enabled,
-        bottomClearance: petTranslationRef.current.bottomClearance,
-      });
+    () => ({
+      shift: keyboardShift.value,
+      enabled: petTranslationShared.value.enabled,
+      bottomClearance: petTranslationShared.value.bottomClearance,
+    }),
+    (current) => {
+      const lift = resolvePetLayerLift(current);
       clampLift.value = lift;
       // A drag holds the offset at the whole lift (see `onStart`); the drop
       // recomputes it.
@@ -1265,7 +1270,7 @@ export function PetOverlay() {
       });
       keyboardClamp.value = isIos ? withSpring(offset, IOS_KEYBOARD_SPRING) : offset;
     },
-    [isIos, keyboardShift, topInset],
+    [isIos, keyboardShift, petTranslationShared, topInset],
   );
   // A drag or a settle moves `y` while the keyboard may be open, so the clamp has
   // to be recomputed for the new resting spot (a pet dragged to the top must not be
