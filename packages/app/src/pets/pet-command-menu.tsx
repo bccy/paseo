@@ -22,6 +22,13 @@ import type { PetSlashCommand } from "./pet-slash-commands";
 const PASEO_MARK = require("../../assets/images/favicon-light.png");
 
 /**
+ * Lets the content container grow to the viewport when the row's label is short,
+ * so the pressable inside can fill the row. A plain object rather than a Unistyles
+ * style: `contentContainerStyle` is the documented trap (docs/unistyles.md).
+ */
+const ROW_SCROLL_CONTENT_STYLE = { flexGrow: 1 } as const;
+
+/**
  * One command row.
  *
  * A `memo` component rather than an inline render function: the row sits in a
@@ -38,17 +45,25 @@ const CommandRow = memo(function CommandRow({
 }) {
   const handlePress = useCallback(() => onSelect(command), [onSelect, command]);
   return (
-    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.menuItemScroll}>
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      style={styles.menuItemScroll}
+      contentContainerStyle={ROW_SCROLL_CONTENT_STYLE}
+    >
       {/*
         The row scrolls, so the ScrollView has to own the gesture: a pressable
         wrapping it would swallow the horizontal drag before the scroll view ever
-        sees it. The row therefore sits inside, sized to the content it activates.
+        sees it. The pressable therefore sits inside and fills the row: the content
+        container grows to the viewport when the label is short, so the blank space
+        right of the label is part of the pressable and not dead scroll surface.
+        A label wider than the viewport still stretches the row and pans.
       */}
       <PressHighlight
         accessibilityRole="button"
         accessibilityLabel={`${command.label}：填入 ${command.insert}`}
         onPress={handlePress}
-        style={styles.menuItem}
+        style={[styles.menuItem, styles.menuItemFill]}
       >
         <View style={styles.menuItemRow}>
           {command.source === "paseo" ? (
@@ -201,6 +216,11 @@ const styles = ThemedStyleSheet.create((theme) => ({
   },
   menuItemScroll: {
     flexGrow: 0,
+  },
+  // Fills the row, so the blank space right of a short label belongs to the
+  // pressable. A long label keeps its own width and still overflows to pan.
+  menuItemFill: {
+    flexGrow: 1,
   },
   menuItemLabel: {
     flexShrink: 0,
