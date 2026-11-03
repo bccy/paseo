@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { useAgentCommandsQuery, type AgentSlashCommand } from "@/hooks/use-agent-commands-query";
+import { useAgentCommandsQuery, type AgentSlashCommand } from "@/agent-commands/use-query";
 import { useDraftCommandConfigStore } from "@/stores/draft-command-config-store";
 import { resolvePetCommandQuery } from "./pet-command-query";
 

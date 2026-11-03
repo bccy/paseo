@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { DraftCommandTarget } from "@/hooks/use-agent-commands-query";
+import type { DraftCommandTarget } from "@/agent-commands";
 import { resolvePetCommandQuery } from "./pet-command-query";
 
 const READY_DRAFT: DraftCommandTarget = {

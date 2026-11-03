@@ -1,13 +1,13 @@
 /** @vitest-environment jsdom */
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentSlashCommand, DraftCommandTarget } from "@/hooks/use-agent-commands-query";
+import type { AgentSlashCommand, DraftCommandTarget } from "@/agent-commands/use-query";
 import { useDraftCommandConfigStore } from "@/stores/draft-command-config-store";
 import { usePetCommandsQuery, type UsePetCommandsQueryInput } from "./use-pet-commands-query";
 
 const { queryMock } = vi.hoisted(() => ({ queryMock: vi.fn() }));
 
-vi.mock("@/hooks/use-agent-commands-query", () => ({
+vi.mock("@/agent-commands/use-query", () => ({
   useAgentCommandsQuery: (options: unknown) => {
     queryMock(options);
     return {

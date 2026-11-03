@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { DraftCommandTarget } from "@/hooks/use-agent-commands-query";
+import type { DraftCommandTarget } from "@/agent-commands";
 import { useDraftCommandConfigStore } from "./draft-command-config-store";
 
 const READY: DraftCommandTarget = {

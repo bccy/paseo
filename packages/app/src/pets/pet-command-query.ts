@@ -10,7 +10,7 @@
  * @module paseo/pets/pet-command-query
  */
 
-import type { DraftCommandConfig, DraftCommandTarget } from "@/hooks/use-agent-commands-query";
+import type { DraftCommandConfig, DraftCommandTarget } from "@/agent-commands";
 import { resolvePetDraftCommandConfig } from "./pet-draft-command-config";
 
 export interface PetCommandQueryInput {

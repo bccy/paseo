@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { DraftCommandTarget } from "@/hooks/use-agent-commands-query";
+import type { DraftCommandTarget } from "@/agent-commands";
 
 /**
  * The command target of each mounted draft composer, keyed by its draft key.
