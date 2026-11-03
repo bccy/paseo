@@ -57,9 +57,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useShallow } from "zustand/shallow";
 import { resolveFocusedChatTarget } from "@/composer/focused-chat-target";
 import { useToast } from "@/contexts/toast-context";
-import { useFetchQuery } from "@/data/query";
 import { KeyboardTranslateView, useKeyboardShift } from "@/keyboard/shift";
-import { useHostRuntimeClient } from "@/runtime/host-runtime";
 import { useDraftStore } from "@/stores/draft-store";
 import {
   useActiveWorkspaceSelection,
@@ -111,13 +109,10 @@ import {
   snapPetToPeekEdge,
 } from "../pets/ledge";
 import { insertLatestPhotoIntoDraft } from "../pets/pet-latest-photo";
-import {
-  buildPetSlashCommands,
-  type PetSlashCommand,
-  type RemoteSlashCommand,
-} from "../pets/pet-slash-commands";
+import { buildPetSlashCommands, type PetSlashCommand } from "../pets/pet-slash-commands";
 import { resolvePetPhotoFeedback } from "../pets/pet-photo-feedback";
 import { resolveTapBurstAction, TAP_BURST_WINDOW_MS } from "../pets/pet-taps";
+import { usePetCommandsQuery } from "../pets/use-pet-commands-query";
 import { PetCommandMenu } from "../pets/pet-command-menu";
 
 // The upstream state machine is a UMD module with no DOM dependencies. Vendored
@@ -649,32 +644,27 @@ export function PetOverlay() {
   );
   const focusedDraftKeyRef = useRef<string | null>(null);
   focusedDraftKeyRef.current = focusedChat?.draftKey ?? null;
+  const [commandMenuVisible, setCommandMenuVisible] = useState(false);
 
-  // Server-side slash commands (model, mode, compact, …). The composer queries
-  // these through a hook that only runs inside a retained panel; the pet sits at
-  // the app root, so it asks the daemon client for the focused agent directly.
+  // Server-side slash commands (model, mode, compact, …). The composer lists
+  // these through the same hook; the pet sits at the app root, outside the
+  // composer tree, so for a draft it reads the focused draft's command target
+  // from the store the draft composer publishes. A draft query waits for the
+  // menu to open: `listCommands` with a draft config creates a daemon session,
+  // and merely focusing a draft tab must not leave an empty one behind. A draft
+  // without a usable target stays disabled and shows only Paseo's local
+  // commands — never another agent's cached list.
   const petServerId = chatSelection?.serverId ?? "";
   const petAgentId = focusedChat?.agentId ?? null;
-  const petHostClient = useHostRuntimeClient(petServerId);
-  // `useFetchQuery` rather than a bare `useQuery`: this file is not allowed to
-  // import `@tanstack/react-query` directly (lint: no-restricted-imports). The
-  // fetch variant is the plain one-shot read this is — nothing pushes updates for
-  // a daemon's command list.
-  const { data: remoteSlashCommands } = useFetchQuery({
-    queryKey: ["pet-slash-commands", petServerId, petAgentId],
-    queryFn: async (): Promise<RemoteSlashCommand[]> => {
-      if (petHostClient === null || petAgentId === null) return [];
-      const response = await petHostClient.listCommands({ agentId: petAgentId });
-      return response.commands as RemoteSlashCommand[];
-    },
-    enabled: petHostClient !== null && petAgentId !== null,
-    staleTimeMs: 60_000,
-    dataShape: "list",
+  const remoteSlashCommands = usePetCommandsQuery({
+    serverId: petServerId,
+    agentId: petAgentId,
+    draftKey: focusedChat?.draftKey ?? null,
+    menuVisible: commandMenuVisible,
   });
 
-  const [commandMenuVisible, setCommandMenuVisible] = useState(false);
   const slashCommands = useMemo<PetSlashCommand[]>(
-    () => buildPetSlashCommands(remoteSlashCommands ?? []),
+    () => buildPetSlashCommands(remoteSlashCommands),
     [remoteSlashCommands],
   );
 

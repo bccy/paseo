@@ -22,6 +22,7 @@ import {
   resolveEffectiveComposerThinkingOptionId,
   type ProviderSelectionState,
 } from "@/provider-selection/provider-selection";
+import { useDraftCommandConfigStore } from "@/stores/draft-command-config-store";
 import { useDraftStore } from "@/stores/draft-store";
 import { AfterPaintPublication } from "@/composer/after-paint-publication";
 import { composeSlashCommandInsert } from "@/composer/draft/slash-command-insert";
@@ -363,6 +364,25 @@ export function useAgentInputDraft(input: UseAgentInputDraftInput): AgentInputDr
       workingDir,
     ],
   );
+
+  // The desk pet renders at the app root, outside this composer's tree. It
+  // reads the focused draft's command target from this store, so publish the
+  // same config the composer's `/` autocomplete uses. Agent-session panels call
+  // this hook without composer options; they must not publish an unrelated
+  // "draft" target under their agent key. A separate cleanup effect keeps the
+  // clear to draft-key changes and unmounts, because clearing on every target
+  // change would blank the pet's menu between two valid configs.
+  const isDraftComposer = composerOptions !== null;
+  useEffect(() => {
+    if (!isDraftComposer) return;
+    useDraftCommandConfigStore.getState().set(draftKey, commandDraft);
+  }, [commandDraft, draftKey, isDraftComposer]);
+
+  useEffect(() => {
+    return () => {
+      useDraftCommandConfigStore.getState().clear(draftKey);
+    };
+  }, [draftKey]);
 
   const composerState = useMemo<DraftComposerState | null>(() => {
     if (!composerOptions) {
