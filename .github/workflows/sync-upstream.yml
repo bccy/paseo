@@ -1,6 +1,26 @@
-# 自动跟随上游 getpaseo/paseo 的 main，把更新合并进本 fork 的 main。
+# 自动跟随上游 getpaseo/paseo 的 main，把更新合并进本 fork 的 main，并自动产出 IPA。
 # 每天 02:00 UTC（北京时间 10:00）跑一次，也可在 Actions 页手动触发。
-# 能干净合并时直接推送 main；有冲突时不改 main，改推 sync/upstream 分支并开 PR 等人工处理。
+# 手动触发可勾选 force：上游已是最新时也强制重建并发布 IPA（构建失败后重跑整条链路用它）。
+#
+# 前置 secret：`SYNC_TOKEN` —— fine-grained PAT，仅授权 bccy/paseo，权限 Contents/Workflows/Actions/Issues 读写。
+#   checkout 与 git push 用它：GITHUB_TOKEN 没有 workflows 权限，推不了含 .github/workflows/** 的合并。
+#   其它 gh 命令仍用 GITHUB_TOKEN（issues / release / rerun 权限足够）。
+#
+# 链路：上游有更新 → 自动合并 main →（有冲突先自动解决机械冲突）→ 用 PAT 推送 main
+#       → PAT 推送会触发 ios-ipa.yml 的 push 事件，不再主动 dispatch（180 秒内没出现 run 才兜底 dispatch 一次；
+#       force 重建没有 push，直接 dispatch）
+#       → 轮询该 headSha 的构建 run → 成功后把 IPA 发布到滚动 release（tag ipa-latest，prerelease 以免顶掉
+#       正式 release 的 latest 指针，影响桌面端自动更新）。
+# 冲突：先由 scripts/sync-upstream-resolve.mjs 自动解决白名单机械冲突（package-lock.json、
+#       nix/npm-deps.hash、各 package.json 的 fork 独有依赖）；仍有真实代码冲突则 git merge --abort，
+#       开/更新标题含 "upstream sync conflict" 的 issue，不改 main，workflow 本身不算失败。
+#       nix/npm-deps.hash 不需要在这里重算：nix-update-hash workflow 带 github.repository == 'getpaseo/paseo'
+#       门禁，在本 fork 上不会运行；nix.yml 构建前用 scripts/update-nix.sh 自行重算，且本 fork 没有 nix 消费方，
+#       所以机械冲突取 theirs 即可。
+# 构建：cancelled 且没有任何 step 记录（macOS runner 容量问题）用 gh run rerun 重试，最多 3 次；
+#       其它失败不重试，开/更新 issue 并附 run 链接。
+#       轮询上限 100 分钟，低于 ios-ipa job 的 120 分钟；sync job 上限 130 分钟覆盖等待 + 兜底 dispatch + 发布。
+#
 # 注意：GitHub 会在仓库连续 60 天无活动后停掉定时 workflow，需要的话手动 Run workflow 一次即可续期。
 
 name: Sync upstream
@@ -9,24 +29,45 @@ on:
   schedule:
     - cron: "0 2 * * *"
   workflow_dispatch:
+    inputs:
+      force:
+        description: "上游已是最新时也强制重建并发布 IPA（构建失败后重跑整条链路用）"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
-  pull-requests: write
+  actions: write
+  issues: write
 
 concurrency:
   group: sync-upstream
   cancel-in-progress: false
 
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  UPSTREAM_REPOSITORY: getpaseo/paseo
+  IOS_WORKFLOW: ios-ipa.yml
+  IOS_ARTIFACT: paseo-ios-ipa
+  RELEASE_TAG: ipa-latest
+
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 130 分钟 = 轮询上限 100 分钟 + 兜底 dispatch 等待 5 分钟 + 发布余量。
+    timeout-minutes: 130
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
+          # 只有带 workflows 权限的 token（SYNC_TOKEN）才能推送含 .github/workflows/** 的合并。
+          token: ${{ secrets.SYNC_TOKEN }}
+          persist-credentials: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
 
       - name: Configure git
         run: |
@@ -34,73 +75,504 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Fetch upstream
+        id: fetch
         run: |
-          git remote add upstream https://github.com/getpaseo/paseo.git
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
           git fetch upstream main
-          echo "upstream=$(git rev-parse --short upstream/main)" >> "$GITHUB_ENV"
+          echo "UPSTREAM_SHA=$(git rev-parse upstream/main)" >> "$GITHUB_ENV"
+          echo "UPSTREAM_SHORT_SHA=$(git rev-parse --short upstream/main)" >> "$GITHUB_ENV"
+          echo "upstream_sha=$(git rev-parse upstream/main)" >> "$GITHUB_OUTPUT"
+          echo "upstream_short=$(git rev-parse --short upstream/main)" >> "$GITHUB_OUTPUT"
 
       - name: Check if up to date
         id: check
+        env:
+          FORCE: ${{ inputs.force }}
         run: |
+          set -euo pipefail
           if git merge-base --is-ancestor upstream/main HEAD; then
             echo "up_to_date=true" >> "$GITHUB_OUTPUT"
-            echo "已经是最新：HEAD 包含 $upstream"
+            echo "已经是最新：HEAD 包含上游 ${UPSTREAM_SHORT_SHA}"
           else
             echo "up_to_date=false" >> "$GITHUB_OUTPUT"
-            echo "落后上游：$(git rev-list --count HEAD..upstream/main) 个 commit"
+            echo "落后上游 $(git rev-list --count HEAD..upstream/main) 个 commit"
+          fi
+          if [ "${FORCE:-false}" = "true" ]; then
+            echo "force=true" >> "$GITHUB_OUTPUT"
+            echo "force=true：上游已是最新也会按当前 HEAD 重建并发布"
+          else
+            echo "force=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Merge upstream into main
-        if: steps.check.outputs.up_to_date == 'false'
         id: merge
+        if: steps.check.outputs.up_to_date == 'false'
         run: |
+          set -uo pipefail
+          # 冲突时保留 merge 状态交给下一步解析，不要在这里 abort。
           if git merge --no-edit upstream/main; then
             echo "clean=true" >> "$GITHUB_OUTPUT"
+            echo "fatal=false" >> "$GITHUB_OUTPUT"
+          elif [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            echo "fatal=false" >> "$GITHUB_OUTPUT"
+            echo "合并出现冲突，保留 merge 状态交给机械冲突解析"
           else
             echo "clean=false" >> "$GITHUB_OUTPUT"
+            echo "fatal=true" >> "$GITHUB_OUTPUT"
             git merge --abort || true
+            echo "::error::git merge 失败且没有产生冲突文件"
           fi
 
-      - name: Push main
-        if: steps.check.outputs.up_to_date == 'false' && steps.merge.outputs.clean == 'true'
+      - name: Resolve mechanical conflicts
+        id: resolve
+        if: steps.check.outputs.up_to_date == 'false' && steps.merge.outputs.fatal != 'true' && steps.merge.outputs.clean == 'false'
         run: |
-          git push origin main
-          echo "main 已更新到 $upstream"
+          set -uo pipefail
+          set +e
+          node scripts/sync-upstream-resolve.mjs 2>&1 | tee sync-resolve.log
+          code=${PIPESTATUS[0]}
+          set -e
+          remaining=$(sed -n 's/^remaining=//p' sync-resolve.log | tail -n 1)
+          resolved=$(sed -n 's/^resolved=//p' sync-resolve.log | tail -n 1)
+          echo "remaining=${remaining:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "resolved=${resolved:-0}" >> "$GITHUB_OUTPUT"
+          echo "exit_code=${code}" >> "$GITHUB_OUTPUT"
+          if [ "$code" -gt 1 ]; then
+            echo "::warning::机械冲突解析脚本异常退出（exit ${code}），按仍有冲突处理"
+          fi
 
-      - name: Publish conflict branch
-        if: steps.check.outputs.up_to_date == 'false' && steps.merge.outputs.clean == 'false'
+      - name: Commit merge and push main
+        id: push
+        if: steps.check.outputs.up_to_date == 'false' && steps.merge.outputs.fatal != 'true' && (steps.merge.outputs.clean == 'true' || steps.resolve.outputs.remaining == '0')
         run: |
           set -euo pipefail
-          BRANCH=sync/upstream
-          git checkout -B "$BRANCH"
-          git merge --no-edit upstream/main || true
-          # 冲突时保留可复现状态：提交冲突标记后推分支，由人解决
-          git add -A
-          git commit -m "chore(sync): merge upstream ${upstream} (conflicts need resolution)" || true
-          git push origin "$BRANCH" --force
+          if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+            git commit --no-edit
+          fi
+          TARGET_SHA=$(git rev-parse HEAD)
+          TARGET_SHORT=$(git rev-parse --short HEAD)
+          # 预检只验证 PAT 认证与连通性：git push --dry-run 不会触发服务端 receive-pack 校验，
+          # 所以 workflows 权限问题仍可能在真实 push 时暴露（真实 push 失败会走下面的提示）。
+          if ! git push --dry-run origin main; then
+            echo "::error::推送预检（git push --dry-run）失败，main 未改动。检查 SYNC_TOKEN 是否存在，且是仅授权 bccy/paseo 的 fine-grained PAT 并含 Workflows 读写权限。"
+            SYNC_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            {
+              echo "自动同步上游 ${UPSTREAM_REPOSITORY} 的 main 后，推送 main 的预检（git push --dry-run）失败，main 未改动。"
+              echo ""
+              echo "- upstream: ${UPSTREAM_SHA}"
+              echo "- 待推送 commit: ${TARGET_SHA}"
+              echo "- 常见原因：SYNC_TOKEN 不存在、已过期，或缺少 Workflows 读写权限"
+              echo ""
+              echo "修复 SYNC_TOKEN 后到 Actions 页手动 Run \"Sync upstream\" 重跑。"
+              echo ""
+              echo "- sync workflow run: ${SYNC_RUN_URL}"
+            } > issue-body.md
+            ISSUE=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --json number,title \
+              --jq '.[] | select(.title | startswith("upstream sync push failed")) | .number' | head -n 1 || true)
+            if [ -n "${ISSUE:-}" ]; then
+              gh issue comment "$ISSUE" -R "$GITHUB_REPOSITORY" --body-file issue-body.md
+            else
+              gh issue create -R "$GITHUB_REPOSITORY" \
+                --title "upstream sync push failed: ${UPSTREAM_SHORT_SHA}" --body-file issue-body.md
+            fi
+            exit 1
+          fi
+          if ! git push origin main; then
+            echo "::error::推送 main 失败（预检通过但实际推送被拒）。检查 SYNC_TOKEN 是否存在，且是仅授权 bccy/paseo 的 fine-grained PAT 并含 Workflows 读写权限。"
+            exit 1
+          fi
+          echo "head_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
+          echo "head_short=${TARGET_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "main 已更新到 ${TARGET_SHORT}"
 
-      - name: Open or update PR for conflicts
-        if: steps.check.outputs.up_to_date == 'false' && steps.merge.outputs.clean == 'false'
+      - name: Report unexpected merge failure
+        id: merge_failure
+        if: steps.merge.outputs.fatal == 'true'
+        run: |
+          echo "::error::git merge 失败且没有产生冲突文件，无法自动解决；请手动检查本 workflow 日志。"
+          exit 1
+
+      - name: Abort merge and report conflicts
+        id: conflict
+        if: steps.check.outputs.up_to_date == 'false' && steps.merge.outputs.fatal != 'true' && steps.merge.outputs.clean == 'false' && steps.resolve.outputs.remaining != '0'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RESOLVED_COUNT: ${{ steps.resolve.outputs.resolved }}
+          REMAINING_COUNT: ${{ steps.resolve.outputs.remaining }}
         run: |
           set -euo pipefail
-          BODY="自动同步上游 getpaseo/paseo 时出现冲突（upstream ${upstream}）。请在本分支解决冲突后合入 main。"
-          if gh pr view sync/upstream -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh pr comment sync/upstream -R "$GITHUB_REPOSITORY" --body "$BODY"
+          git diff --name-only --diff-filter=U > conflicts.txt || true
+          git merge --abort || true
+          SYNC_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          {
+            echo "自动同步上游 ${UPSTREAM_REPOSITORY} 的 main 时出现无法机械解决的冲突（upstream ${UPSTREAM_SHA}）。"
+            echo ""
+            echo "**冲突文件**"
+            echo ""
+            if [ -s conflicts.txt ]; then sed 's/^/- /' conflicts.txt; else echo "- 解析阶段已无冲突文件记录，请手动 git merge 复核"; fi
+            echo ""
+            echo "**自动解决情况**"
+            echo ""
+            echo "- 已自动解决机械冲突 ${RESOLVED_COUNT:-0} 个（package-lock.json / nix/npm-deps.hash / package.json 的 fork 独有依赖）"
+            echo "- 仍有 ${REMAINING_COUNT:-unknown} 个真实代码冲突，main 未改动"
+            echo ""
+            echo "**手动处理步骤**"
+            echo ""
+            echo "1. 本地执行 git fetch upstream && git merge upstream/main，按上面文件逐个解决。"
+            echo "2. 解决后 git commit && git push origin main。"
+            echo "3. 推送后到 Actions 页手动 Run 一次 Sync upstream 并勾选 force，重建并发布 IPA（单独跑 iOS signed ipa 不会发 Release）。"
+            echo ""
+            echo "- sync workflow run: ${SYNC_RUN_URL}"
+          } > issue-body.md
+          ISSUE=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --json number,title \
+            --jq '.[] | select(.title | startswith("upstream sync conflict")) | .number' | head -n 1 || true)
+          if [ -n "${ISSUE:-}" ]; then
+            gh issue comment "$ISSUE" -R "$GITHUB_REPOSITORY" --body-file issue-body.md
+            ISSUE_URL=$(gh issue view "$ISSUE" -R "$GITHUB_REPOSITORY" --json url --jq .url)
           else
-            gh pr create -R "$GITHUB_REPOSITORY" \
-              --base main --head sync/upstream \
-              --title "sync: 上游 ${upstream} 需要手动解决冲突" \
-              --body "$BODY"
+            ISSUE_URL=$(gh issue create -R "$GITHUB_REPOSITORY" \
+              --title "upstream sync conflict: ${UPSTREAM_SHORT_SHA}" --body-file issue-body.md)
           fi
+          echo "issue_url=${ISSUE_URL}" >> "$GITHUB_OUTPUT"
+          echo "::warning::上游同步存在真实冲突，main 未改动；已记录到 ${ISSUE_URL}"
+
+      - name: Resolve build target
+        id: target
+        # 有合并（push 成功）或 force 重建（上游已是最新、没有 push）时才进入构建。
+        if: steps.push.outputs.head_sha != '' || (steps.check.outputs.force == 'true' && steps.check.outputs.up_to_date == 'true')
+        env:
+          PUSHED_SHA: ${{ steps.push.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PUSHED_SHA:-}" ]; then
+            TARGET_SHA="$PUSHED_SHA"
+            PUSHED=true
+            SOURCE="本次合并"
+          else
+            TARGET_SHA=$(git rev-parse HEAD)
+            PUSHED=false
+            SOURCE="force 重建当前 HEAD"
+          fi
+          echo "head_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
+          echo "head_short=$(git rev-parse --short "$TARGET_SHA")" >> "$GITHUB_OUTPUT"
+          echo "pushed=${PUSHED}" >> "$GITHUB_OUTPUT"
+          echo "构建目标：${TARGET_SHA}（${SOURCE}）"
+
+      - name: Wait for iOS build
+        id: build
+        # 轮询上限 100 分钟（低于 ios-ipa job 的 120 分钟）；本 step 上限 120 分钟覆盖「等 run 出现 + 兜底 dispatch + 轮询」。
+        if: steps.target.outputs.head_sha != ''
+        timeout-minutes: 120
+        env:
+          TARGET_SHA: ${{ steps.target.outputs.head_sha }}
+          PUSHED: ${{ steps.target.outputs.pushed }}
+        run: |
+          set -uo pipefail
+          HEAD_SHA="${TARGET_SHA:?缺少构建目标}"
+          MAX_ATTEMPTS=3
+          POLL_SECONDS=30
+          APPEAR_TIMEOUT_SECONDS=180
+          RUN_TIMEOUT_SECONDS=6000
+          RUN_ID=""
+          RUN_URL=""
+          OK=false
+          CONCLUSION="unknown"
+          REASON=""
+          ATTEMPT=1
+
+          # run databaseId 单调递增：force 重建时把 baseline 设为同 headSha 旧 run 的最大 id，
+          # 之后只认 databaseId > baseline 的 run；这样同一 commit 有多条旧 run 时不会选中第二旧的那条。
+          BASELINE_RUN_ID=0
+          list_runs() {
+            gh run list -R "$GITHUB_REPOSITORY" --workflow "$IOS_WORKFLOW" --limit 30 \
+              --json databaseId,headSha,createdAt
+          }
+
+          find_run() {
+            list_runs \
+              | jq -r --arg sha "$HEAD_SHA" --argjson baseline "$BASELINE_RUN_ID" \
+                '[.[] | select(.headSha == $sha) | select(.databaseId > $baseline)] | sort_by(.databaseId) | first | .databaseId // empty'
+          }
+
+          wait_for_run() { # $1 = 最多等待秒数
+            local waited=0
+            while [ -z "$RUN_ID" ] && [ "$waited" -lt "$1" ]; do
+              sleep 10
+              waited=$((waited + 10))
+              RUN_ID=$(find_run)
+            done
+          }
+
+          # force 重建没有 push：先取同 headSha 旧 run 的最大 id 作 baseline，避免把旧 run 当成这次的结果。
+          if [ "${PUSHED:-false}" != "true" ]; then
+            BASELINE_RUN_ID=$(list_runs | jq -r --arg sha "$HEAD_SHA" \
+              '[.[] | select(.headSha == $sha)] | max_by(.databaseId) | .databaseId // 0')
+            BASELINE_RUN_ID=${BASELINE_RUN_ID:-0}
+            echo "force 重建：baseline run id = ${BASELINE_RUN_ID}（只认比它新的 run）"
+          fi
+
+          # PAT 推送 main 会触发 ios-ipa.yml 的 push 事件，先等它出现，避免重复构建；
+          # force 重建没有 push，直接走 dispatch。
+          if [ "${PUSHED:-false}" = "true" ]; then
+            wait_for_run "$APPEAR_TIMEOUT_SECONDS"
+          fi
+          if [ -z "$RUN_ID" ]; then
+            echo "::warning::没有可复用的 iOS 构建 run（pushed=${PUSHED:-false}），dispatch 一次"
+            if gh workflow run "$IOS_WORKFLOW" -R "$GITHUB_REPOSITORY" --ref main; then
+              wait_for_run 300
+            else
+              REASON="兜底 gh workflow run ${IOS_WORKFLOW} 失败"
+            fi
+          fi
+
+          if [ -z "$RUN_ID" ]; then
+            REASON="${REASON:-没有找到 headSha=${HEAD_SHA} 的 iOS 构建 run，dispatch 也没等到}"
+          else
+            RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
+            echo "等待构建：${RUN_URL}"
+            DEADLINE=$((SECONDS + RUN_TIMEOUT_SECONDS))
+            while true; do
+              # 轮询直到「当前尝试」完成（run_attempt 用来区分 rerun 前后的结果）或总超时。
+              while true; do
+                RUN_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" 2>/dev/null || echo '{}')
+                STATUS=$(jq -r '.status // "unknown"' <<<"$RUN_JSON")
+                RUN_ATTEMPT=$(jq -r '.run_attempt // 1' <<<"$RUN_JSON")
+                if [ "$STATUS" = "completed" ] && [ "${RUN_ATTEMPT:-1}" -ge "$ATTEMPT" ]; then
+                  CONCLUSION=$(jq -r '.conclusion // "unknown"' <<<"$RUN_JSON")
+                  break
+                fi
+                if [ "$SECONDS" -ge "$DEADLINE" ]; then
+                  CONCLUSION="timeout"
+                  REASON="等待构建超过 $((RUN_TIMEOUT_SECONDS / 60)) 分钟仍未完成（run 可能还在跑）"
+                  break
+                fi
+                sleep "$POLL_SECONDS"
+              done
+              echo "构建结论：${CONCLUSION}（第 ${ATTEMPT}/${MAX_ATTEMPTS} 次尝试）"
+
+              if [ "$CONCLUSION" = "success" ]; then
+                OK=true
+                break
+              fi
+              if [ "$CONCLUSION" = "timeout" ]; then
+                break
+              fi
+              STEP_COUNT=$(gh run view "$RUN_ID" -R "$GITHUB_REPOSITORY" --json jobs \
+                --jq '[.jobs[] | (.steps // [])] | add | length' 2>/dev/null || echo 0)
+              if [ "$CONCLUSION" = "cancelled" ] && [ "${STEP_COUNT:-0}" = "0" ]; then
+                if [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]; then
+                  REASON="构建连续被 cancelled 且没有任何 step 记录（macOS runner 容量问题），已重试 ${MAX_ATTEMPTS} 次"
+                  break
+                fi
+                ATTEMPT=$((ATTEMPT + 1))
+                echo "::warning::run ${RUN_ID} 被 cancelled 且没有任何 step 记录（macOS runner 容量问题），第 ${ATTEMPT}/${MAX_ATTEMPTS} 次尝试：gh run rerun"
+                if ! gh run rerun "$RUN_ID" -R "$GITHUB_REPOSITORY"; then
+                  REASON="gh run rerun ${RUN_ID} 失败"
+                  ATTEMPT=$((ATTEMPT - 1))
+                  break
+                fi
+                # 等 rerun 真正生效（run_attempt 增加），避免把旧的 cancelled 状态当成新结果。
+                RERUN_STARTED=false
+                RERUN_WAITED=0
+                while [ "$RERUN_WAITED" -lt 300 ]; do
+                  sleep 10
+                  RERUN_WAITED=$((RERUN_WAITED + 10))
+                  RERUN_ATTEMPT=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" 2>/dev/null | jq -r '.run_attempt // 0')
+                  if [ "${RERUN_ATTEMPT:-0}" -ge "$ATTEMPT" ]; then
+                    RERUN_STARTED=true
+                    break
+                  fi
+                done
+                if [ "$RERUN_STARTED" != "true" ]; then
+                  REASON="gh run rerun 后 5 分钟内 run_attempt 没有增加"
+                  break
+                fi
+                continue
+              fi
+              REASON="构建结论 ${CONCLUSION}（step 数 ${STEP_COUNT:-0}）"
+              break
+            done
+          fi
+
+          if [ "$OK" != "true" ]; then
+            echo "::error::iOS 构建未成功：${REASON:-未知原因}（run ${RUN_URL:-未创建}）"
+          fi
+          ATTEMPTS_USED=$ATTEMPT
+          if [ "$ATTEMPTS_USED" -gt "$MAX_ATTEMPTS" ]; then ATTEMPTS_USED=$MAX_ATTEMPTS; fi
+          {
+            echo "ok=${OK}"
+            echo "run_id=${RUN_ID}"
+            echo "run_url=${RUN_URL}"
+            echo "conclusion=${CONCLUSION}"
+            echo "attempts=${ATTEMPTS_USED}"
+            echo "reason=${REASON:-未知原因}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Report build failure
+        id: build_failure
+        if: steps.build.outputs.ok == 'false'
+        env:
+          TARGET_SHA: ${{ steps.target.outputs.head_sha }}
+          TARGET_SHORT: ${{ steps.target.outputs.head_short }}
+          BUILD_CONCLUSION: ${{ steps.build.outputs.conclusion }}
+          BUILD_ATTEMPTS: ${{ steps.build.outputs.attempts }}
+          BUILD_REASON: ${{ steps.build.outputs.reason }}
+          BUILD_RUN_URL: ${{ steps.build.outputs.run_url }}
+        run: |
+          set -euo pipefail
+          SYNC_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          {
+            echo "自动同步上游 ${UPSTREAM_REPOSITORY} 的 main 后，iOS IPA 构建失败。"
+            echo ""
+            echo "- upstream: ${UPSTREAM_SHA}"
+            echo "- 构建 commit: ${TARGET_SHA:-unknown}"
+            echo "- 构建结论: ${BUILD_CONCLUSION:-unknown}（尝试 ${BUILD_ATTEMPTS:-1} 次）"
+            echo "- 原因: ${BUILD_REASON:-未知}"
+            echo "- 构建 run: ${BUILD_RUN_URL:-未创建}"
+            echo ""
+            echo "修复后到 Actions 页手动 Run \"Sync upstream\" 并勾选 force 重跑整条链路（单独跑 iOS signed ipa 不会发 Release）。"
+            echo ""
+            echo "- sync workflow run: ${SYNC_RUN_URL}"
+          } > issue-body.md
+          ISSUE=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --json number,title \
+            --jq '.[] | select(.title | startswith("iOS IPA build failed")) | .number' | head -n 1 || true)
+          if [ -n "${ISSUE:-}" ]; then
+            gh issue comment "$ISSUE" -R "$GITHUB_REPOSITORY" --body-file issue-body.md
+            ISSUE_URL=$(gh issue view "$ISSUE" -R "$GITHUB_REPOSITORY" --json url --jq .url)
+          else
+            ISSUE_URL=$(gh issue create -R "$GITHUB_REPOSITORY" \
+              --title "iOS IPA build failed: ${TARGET_SHORT:-unknown}" --body-file issue-body.md)
+          fi
+          echo "issue_url=${ISSUE_URL}" >> "$GITHUB_OUTPUT"
+          echo "::error::iOS 构建失败，已记录到 ${ISSUE_URL}"
+          exit 1
+
+      - name: Publish IPA to rolling release
+        id: release
+        if: steps.build.outputs.ok == 'true'
+        env:
+          TARGET_SHA: ${{ steps.target.outputs.head_sha }}
+          TARGET_SHORT: ${{ steps.target.outputs.head_short }}
+          BUILD_RUN_ID: ${{ steps.build.outputs.run_id }}
+          BUILD_RUN_URL: ${{ steps.build.outputs.run_url }}
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          ASSET="Paseo-${VERSION}-${TARGET_SHORT}.ipa"
+          rm -rf dist
+          mkdir -p dist
+          gh run download "$BUILD_RUN_ID" -R "$GITHUB_REPOSITORY" -n "$IOS_ARTIFACT" -D dist
+          IPA=$(find dist -type f -name '*.ipa' | head -n 1)
+          if [ -z "$IPA" ]; then
+            echo "::error::构建产物里没有 .ipa"
+            exit 1
+          fi
+          mv "$IPA" "$ASSET"
+          {
+            echo "自动同步上游后构建的签名 IPA（ad-hoc），只作为 release asset 发布，不提交进 git。"
+            echo ""
+            echo "- 版本: ${VERSION}"
+            echo "- 上游 commit: ${UPSTREAM_SHA}"
+            echo "- 构建 commit: ${TARGET_SHA}"
+            echo "- 构建时间: $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo "- 构建 run: ${BUILD_RUN_URL}"
+          } > release-notes.md
+          # 先上传新 asset，成功后再删旧 asset：上传失败不会留下空 release。
+          if gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$ASSET" -R "$GITHUB_REPOSITORY" --clobber
+            gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' > assets.txt
+            while IFS= read -r asset; do
+              if [ -n "$asset" ] && [ "$asset" != "$ASSET" ]; then
+                gh release delete-asset "$RELEASE_TAG" "$asset" -R "$GITHUB_REPOSITORY" --yes
+              fi
+            done < assets.txt
+            gh release edit "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --notes-file release-notes.md
+          else
+            gh release create "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --prerelease \
+              --title "Paseo iOS IPA (latest)" --notes-file release-notes.md
+            gh release upload "$RELEASE_TAG" "$ASSET" -R "$GITHUB_REPOSITORY" --clobber
+          fi
+          RELEASE_URL=$(gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json url --jq .url)
+          echo "release_url=${RELEASE_URL}" >> "$GITHUB_OUTPUT"
+          echo "已发布 ${ASSET}：${RELEASE_URL}"
+
+      - name: Close stale sync issues
+        id: close_issues
+        if: steps.release.outputs.release_url != ''
+        env:
+          RELEASE_URL: ${{ steps.release.outputs.release_url }}
+          TARGET_SHA: ${{ steps.target.outputs.head_sha }}
+        run: |
+          set -uo pipefail
+          COMMENT="已通过全自动同步链路完成：构建 commit ${TARGET_SHA} 的 IPA 已发布 ${RELEASE_URL}。自动关闭本 issue。"
+          ISSUES=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 50 --json number,title \
+            --jq '.[] | select((.title | startswith("upstream sync conflict")) or (.title | startswith("iOS IPA build failed")) or (.title | startswith("upstream sync push failed"))) | .number' || true)
+          if [ -z "${ISSUES:-}" ]; then
+            echo "没有需要关闭的遗留 issue"
+            exit 0
+          fi
+          for number in $ISSUES; do
+            if gh issue comment "$number" -R "$GITHUB_REPOSITORY" --body "$COMMENT" \
+              && gh issue close "$number" -R "$GITHUB_REPOSITORY" --reason completed; then
+              echo "已关闭 issue #${number}"
+            else
+              echo "::warning::关闭 issue #${number} 失败（不影响本次发布）"
+            fi
+          done
 
       - name: Summary
+        if: always()
+        env:
+          UP_TO_DATE: ${{ steps.check.outputs.up_to_date }}
+          FORCE: ${{ steps.check.outputs.force }}
+          MERGE_CLEAN: ${{ steps.merge.outputs.clean }}
+          MERGE_FATAL: ${{ steps.merge.outputs.fatal }}
+          RESOLVE_REMAINING: ${{ steps.resolve.outputs.remaining }}
+          TARGET_SHA: ${{ steps.target.outputs.head_sha }}
+          TARGET_PUSHED: ${{ steps.target.outputs.pushed }}
+          BUILD_OK: ${{ steps.build.outputs.ok }}
+          BUILD_RUN_URL: ${{ steps.build.outputs.run_url }}
+          BUILD_ATTEMPTS: ${{ steps.build.outputs.attempts }}
+          BUILD_CONCLUSION: ${{ steps.build.outputs.conclusion }}
+          BUILD_REASON: ${{ steps.build.outputs.reason }}
+          RELEASE_URL: ${{ steps.release.outputs.release_url }}
+          CONFLICT_ISSUE: ${{ steps.conflict.outputs.issue_url }}
+          BUILD_ISSUE: ${{ steps.build_failure.outputs.issue_url }}
         run: |
+          set -uo pipefail
+          if [ "${FORCE:-false}" = "true" ] && [ "${UP_TO_DATE:-}" = "true" ]; then
+            RESULT="force：上游已是最新，按当前 HEAD 重建并发布"
+          elif [ "${UP_TO_DATE:-}" = "true" ]; then
+            RESULT="已经是最新，未做改动"
+          elif [ "${MERGE_FATAL:-}" = "true" ]; then
+            RESULT="git merge 异常失败，未改 main"
+          elif [ "${MERGE_CLEAN:-}" = "true" ]; then
+            RESULT="已自动合并（无冲突）"
+          elif [ "${RESOLVE_REMAINING:-}" = "0" ]; then
+            RESULT="已自动合并（机械冲突已自动解决）"
+          else
+            RESULT="存在真实代码冲突，已开 issue 等人工处理（main 未改动）"
+          fi
           {
             echo "### Sync upstream"
             echo ""
-            echo "- upstream: \`${upstream}\`"
-            echo "- 最新: ${{ steps.check.outputs.up_to_date }}"
-            echo "- 干净合并: ${{ steps.merge.outputs.clean || 'n/a' }}"
+            echo "- upstream: \`${UPSTREAM_SHA:-unknown}\`"
+            echo "- 结果: ${RESULT}"
+            if [ "${FORCE:-false}" = "true" ]; then echo "- force: true（上游已是最新也重建）"; fi
+            if [ "${MERGE_CLEAN:-}" = "false" ] && [ -n "${RESOLVE_REMAINING:-}" ]; then
+              echo "- 机械冲突解析后剩余冲突数: ${RESOLVE_REMAINING}"
+            fi
+            if [ -n "${CONFLICT_ISSUE:-}" ]; then echo "- 冲突 issue: ${CONFLICT_ISSUE}"; fi
+            if [ "${TARGET_PUSHED:-}" = "true" ] && [ -n "${TARGET_SHA:-}" ]; then
+              echo "- 合并后 main: \`${TARGET_SHA}\`"
+            elif [ -n "${TARGET_SHA:-}" ]; then
+              echo "- 构建 commit（force）: \`${TARGET_SHA}\`"
+            fi
+            if [ -n "${BUILD_RUN_URL:-}" ]; then
+              echo "- iOS 构建: ${BUILD_RUN_URL}（${BUILD_CONCLUSION:-unknown}，尝试 ${BUILD_ATTEMPTS:-1} 次）"
+            fi
+            if [ "${BUILD_OK:-}" = "false" ]; then echo "- 构建失败原因: ${BUILD_REASON:-未知}"; fi
+            if [ -n "${BUILD_ISSUE:-}" ]; then echo "- 构建失败 issue: ${BUILD_ISSUE}"; fi
+            if [ -n "${RELEASE_URL:-}" ]; then echo "- Release: ${RELEASE_URL}"; fi
           } >> "$GITHUB_STEP_SUMMARY"
