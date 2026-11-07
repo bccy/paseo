@@ -529,6 +529,7 @@ describe("selectSubagentsForParent", () => {
         provider: "claude",
         title: "Review child",
         status: "running",
+        backgroundWork: { count: 1 },
         requiresAttention: true,
         attentionReason: "permission",
         pendingPermissions: [pendingPermission],
@@ -557,6 +558,7 @@ describe("selectSubagentsForParent", () => {
         description: null,
         subtitle: null,
         status: "running",
+        backgroundWork: { count: 1 },
         turn: { phase: "idle", cancellationRequestId: null },
         requiresAttention: true,
         attentionReason: "permission",
@@ -567,6 +569,7 @@ describe("selectSubagentsForParent", () => {
     expect(Object.keys(rows[0] ?? {}).sort()).toEqual([
       "address",
       "attentionReason",
+      "backgroundWork",
       "createdAt",
       "description",
       "id",

@@ -26,6 +26,7 @@ export interface PaseoSubagentRow {
   description: null;
   subtitle: null;
   status: Agent["status"];
+  backgroundWork?: Agent["backgroundWork"];
   turn: Agent["turn"];
   requiresAttention: Agent["requiresAttention"];
   /**
@@ -80,6 +81,7 @@ function toSubagentRow(agent: Agent): SubagentRow {
     description: null,
     subtitle: null,
     status: agent.status,
+    backgroundWork: agent.backgroundWork,
     turn: agent.turn,
     requiresAttention: agent.requiresAttention,
     attentionReason: agent.attentionReason,
@@ -99,20 +101,32 @@ function toSubagentRow(agent: Agent): SubagentRow {
  * alone put freshly finished rows in the same band as rows waiting on the user — and those rows
  * then buried the ones still running. `getAgentStatusPriority` keys off the reason instead,
  * which is what tells a stopped process apart from a finished one.
+ *
+ * Subagent rows have no read state of their own: the track is where a failed child stays visible
+ * after the parent's attention was cleared, so a lifecycle `error` always ranks with the
+ * failures. The shared table otherwise treats a read error as settled.
  */
 function subagentRankInput(row: SubagentRow): AgentStateBucketInput {
   if (row.kind === "paseo") {
+    const permission =
+      (row.pendingPermissionCount ?? 0) > 0 || row.attentionReason === "permission";
+    const failed = row.status === "error" && !permission;
     return {
       status: row.status,
       pendingPermissionCount: row.pendingPermissionCount ?? 0,
-      attentionReason: row.attentionReason ?? null,
+      attentionReason: failed ? "error" : (row.attentionReason ?? null),
+      requiresAttention: failed ? true : row.requiresAttention,
+      backgroundWork: row.backgroundWork,
     };
   }
   // Provider rows spell their lifecycle differently — `running | completed | failed | canceled`
   // against `initializing | idle | running | error | closed` — so `failed` has to become `error`
-  // before the shared table can read it. Provider rows carry no `attentionReason`; their
-  // `requiresAttention` is derived from the status, which is why the status alone decides.
-  return { status: providerSubagentLifecycleStatus(row.status) };
+  // before the shared table can read it. Provider rows carry no `attentionReason` either, so a
+  // failed child has to spell the unread-error input that keeps it in the failures band.
+  const status = providerSubagentLifecycleStatus(row.status);
+  return status === "error"
+    ? { status, requiresAttention: true, attentionReason: "error" }
+    : { status };
 }
 
 function compareSubagentRows(left: SubagentRow, right: SubagentRow): number {
