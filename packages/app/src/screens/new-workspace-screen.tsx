@@ -8,8 +8,8 @@ import { encodeImages } from "@/utils/encode-images";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { useTranslation } from "react-i18next";
 import { useIsFocused } from "expo-router/react-navigation";
+import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { createNameId } from "mnemonic-id";
@@ -862,10 +862,10 @@ export function NewWorkspaceScreen({
   const isCompact = useIsCompactFormFactor();
   const toast = useToast();
   // This route stays mounted when another one is pushed over it (pushing settings
-  // does not unmount New workspace), and its composers hard-code
-  // `isPaneFocused={true}` because they are not inside a retained panel. Without a
-  // page-level signal the composer would keep claiming the desk pet's ledge from
-  // under the settings screen, parking a peek on an invisible input box.
+  // does not unmount New workspace), so its composers take the page-level focus as
+  // their pane focus and as `isScreenFocused` for the desk pet's ledge. Without a
+  // page-level signal the composer would keep claiming the ledge from under the
+  // settings screen, parking a peek on an invisible input box.
   //
   // The focus is read *here* rather than inside `Composer` on purpose: `Composer`
   // is also rendered outside any navigator (the workspace setup dialog), where
@@ -1555,7 +1555,7 @@ export function NewWorkspaceScreen({
       submitLabel={terminalSubmitLabel}
       agentId={draftKey}
       serverId={selectedServerId}
-      isPaneFocused={true}
+      isPaneFocused={isScreenFocused}
       isScreenFocused={isScreenFocused}
       onSubmitMessage={handleSubmitTerminalLaunch}
       allowEmptySubmit={true}
@@ -1580,7 +1580,7 @@ export function NewWorkspaceScreen({
       editingSession={composerEditing.chat}
       agentId={draftKey}
       serverId={selectedServerId}
-      isPaneFocused={true}
+      isPaneFocused={isScreenFocused}
       isScreenFocused={isScreenFocused}
       onSubmitMessage={handleSubmitNewWorkspace}
       allowEmptySubmit={true}
