@@ -10,7 +10,7 @@ const READY_DRAFT: DraftCommandTarget = {
     modeId: "auto",
     model: "gpt-5.4",
     thinkingOptionId: "high",
-    featureValues: { "web-search": true },
+    providerOptions: { "web-search": true },
   },
 };
 
@@ -32,7 +32,7 @@ describe("resolvePetCommandQuery", () => {
         modeId: "auto",
         model: "gpt-5.4",
         thinkingOptionId: "high",
-        featureValues: { "web-search": true },
+        providerOptions: { "web-search": true },
       },
       enabled: false,
     });
@@ -55,7 +55,7 @@ describe("resolvePetCommandQuery", () => {
         modeId: "auto",
         model: "gpt-5.4",
         thinkingOptionId: "high",
-        featureValues: { "web-search": true },
+        providerOptions: { "web-search": true },
       },
       enabled: true,
     });
@@ -131,7 +131,7 @@ describe("resolvePetCommandQuery", () => {
         modeId: "auto",
         model: "gpt-5.4",
         thinkingOptionId: "high",
-        featureValues: { "web-search": true },
+        providerOptions: { "web-search": true },
       },
       enabled: false,
     });

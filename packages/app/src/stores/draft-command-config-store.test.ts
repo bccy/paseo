@@ -37,7 +37,7 @@ describe("useDraftCommandConfigStore", () => {
       config: {
         provider: "codex",
         cwd: "/repo",
-        featureValues: { "web-search": true, effort: "high" },
+        providerOptions: { "web-search": true, effort: "high" },
       },
     };
     useDraftCommandConfigStore.getState().set("draft:server:draft-1", withFeatures);
@@ -48,7 +48,7 @@ describe("useDraftCommandConfigStore", () => {
       config: {
         provider: "codex",
         cwd: "/repo",
-        featureValues: { "web-search": true, effort: "high" },
+        providerOptions: { "web-search": true, effort: "high" },
       },
     });
     expect(useDraftCommandConfigStore.getState().byDraftKey).toBe(previousByDraftKey);
@@ -58,7 +58,7 @@ describe("useDraftCommandConfigStore", () => {
       config: {
         provider: "codex",
         cwd: "/repo",
-        featureValues: { "web-search": true, effort: "low" },
+        providerOptions: { "web-search": true, effort: "low" },
       },
     });
     expect(useDraftCommandConfigStore.getState().byDraftKey).not.toBe(previousByDraftKey);

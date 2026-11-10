@@ -27,7 +27,7 @@ const READY: DraftCommandTarget = {
     modeId: "auto",
     model: "gpt-5.4",
     thinkingOptionId: "high",
-    featureValues: { "web-search": true },
+    providerOptions: { "web-search": true },
   },
 };
 
@@ -37,7 +37,7 @@ const READY_CONFIG = {
   modeId: "auto",
   model: "gpt-5.4",
   thinkingOptionId: "high",
-  featureValues: { "web-search": true },
+  providerOptions: { "web-search": true },
 };
 
 const DRAFT_KEY = "draft:server-1:draft-1";

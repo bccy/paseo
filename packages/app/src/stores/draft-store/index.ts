@@ -36,6 +36,9 @@ import {
 } from "./migration";
 import { createDraftPersistStorage } from "./persistence";
 import { createValidatedPersistStorage } from "@/storage/validated-persist-storage";
+import type { JsonValue } from "@getpaseo/protocol/agent-types";
+import { applyMetadataPatch } from "@/composer/draft/metadata";
+import { hasDraftContent } from "@/composer/draft/input-draft-core";
 
 export type { DraftInput, DraftLifecycleState } from "./state";
 
@@ -43,12 +46,25 @@ interface DraftStoreActions {
   getDraftInput: (draftKey: string) => DraftInput | undefined;
   hydrateDraftInput: (input: { draftKey: string }) => Promise<DraftInput | undefined>;
   saveDraftInput: (input: { draftKey: string; draft: DraftInput }) => void;
+  /** Saves what `update` makes of the current input; an emptied input abandons the draft. */
+  updateDraftInput: (input: {
+    draftKey: string;
+    update: (current: DraftInput) => DraftInput;
+  }) => void;
   editDraftText: (input: { draftKey: string; text: string }) => void;
+  /**
+   * Sets the text on behalf of something other than the input, which then shows it. Use
+   * `editDraftText` for the input's own edits.
+   */
+  replaceDraftText: (input: { draftKey: string; text: string }) => void;
   markDraftLifecycle: (input: { draftKey: string; lifecycle: DraftLifecycleState }) => void;
   clearDraftInput: (input: {
     draftKey: string;
     lifecycle?: Exclude<DraftLifecycleState, "active">;
   }) => void;
+  /** Plugin metadata the draft will create its agent with; see `composer/draft/metadata`. */
+  patchDraftMetadata: (input: { draftKey: string; patch: Record<string, JsonValue> }) => void;
+  clearDraftMetadata: (input: { draftKey: string }) => void;
   attachWorkspaceFile: (input: {
     draftKey: string;
     attachment: WorkspaceFileComposerAttachment;
@@ -83,6 +99,13 @@ interface DraftStoreRuntimeState {
   textInsertRequestByDraftKey: Record<string, TextInsertRequest>;
   /** Highest text-insert revision already applied, per draft. */
   appliedTextInsertRevisionByDraftKey: Record<string, number>;
+  /** Counts `replaceDraftText`, so a mounted input knows to show text it did not type. */
+  textReplacementRequestByDraftKey: Record<string, number>;
+  /**
+   * Kept beside the prompt so a composer that remounts finds it. Not persisted, and not cleared
+   * with an emptied prompt: a plugin's choice outlives the text until the draft is sent.
+   */
+  metadataByDraftKey: Record<string, Record<string, JsonValue>>;
 }
 
 type DraftStore = DraftStoreState & DraftStoreRuntimeState & DraftStoreActions;
@@ -281,6 +304,8 @@ export const useDraftStore = create<DraftStore>()(
       attachmentFocusRequestByDraftKey: {},
       textInsertRequestByDraftKey: {},
       appliedTextInsertRevisionByDraftKey: {},
+      textReplacementRequestByDraftKey: {},
+      metadataByDraftKey: {},
 
       getDraftInput: (draftKey) => {
         const record = get().drafts[draftKey];
@@ -343,12 +368,28 @@ export const useDraftStore = create<DraftStore>()(
         scheduleAttachmentGc();
       },
 
+      updateDraftInput: ({ draftKey, update }) => {
+        const next = update(get().getDraftInput(draftKey) ?? { text: "", attachments: [] });
+        if (hasDraftContent(next)) get().saveDraftInput({ draftKey, draft: next });
+        else get().clearDraftInput({ draftKey, lifecycle: "abandoned" });
+      },
+
       editDraftText: ({ draftKey, text }) => {
         set((state) => {
           const previous = state.drafts[draftKey];
           const next = editDraftRecordText(previous, text, Date.now());
           return next === previous ? state : { drafts: { ...state.drafts, [draftKey]: next } };
         });
+      },
+
+      replaceDraftText: ({ draftKey, text }) => {
+        get().editDraftText({ draftKey, text });
+        set((state) => ({
+          textReplacementRequestByDraftKey: {
+            ...state.textReplacementRequestByDraftKey,
+            [draftKey]: (state.textReplacementRequestByDraftKey[draftKey] ?? 0) + 1,
+          },
+        }));
       },
 
       markDraftLifecycle: ({ draftKey, lifecycle }) => {
@@ -397,6 +438,25 @@ export const useDraftStore = create<DraftStore>()(
         });
 
         scheduleAttachmentGc();
+      },
+
+      patchDraftMetadata: ({ draftKey, patch }) => {
+        set((state) => {
+          const next = applyMetadataPatch(state.metadataByDraftKey[draftKey] ?? {}, patch);
+          const { [draftKey]: _previous, ...others } = state.metadataByDraftKey;
+          return {
+            metadataByDraftKey:
+              Object.keys(next).length > 0 ? { ...others, [draftKey]: next } : others,
+          };
+        });
+      },
+
+      clearDraftMetadata: ({ draftKey }) => {
+        set((state) => {
+          if (!(draftKey in state.metadataByDraftKey)) return state;
+          const { [draftKey]: _removed, ...others } = state.metadataByDraftKey;
+          return { metadataByDraftKey: others };
+        });
       },
 
       attachWorkspaceFile: async ({ draftKey, attachment }) => {

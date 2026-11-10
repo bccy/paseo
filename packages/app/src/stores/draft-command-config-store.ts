@@ -42,7 +42,7 @@ function draftCommandTargetsEqual(a: DraftCommandTarget, b: DraftCommandTarget):
   if (a.config.modeId !== b.config.modeId) return false;
   if (a.config.model !== b.config.model) return false;
   if (a.config.thinkingOptionId !== b.config.thinkingOptionId) return false;
-  return featureValuesEqual(a.config.featureValues, b.config.featureValues);
+  return featureValuesEqual(a.config.providerOptions, b.config.providerOptions);
 }
 
 export const useDraftCommandConfigStore = create<DraftCommandConfigState>()((set, get) => ({

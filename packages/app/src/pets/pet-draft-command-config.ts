@@ -28,13 +28,13 @@ export function resolvePetDraftCommandConfig(
   const modeId = config.modeId?.trim() ?? "";
   const model = config.model?.trim() ?? "";
   const thinkingOptionId = config.thinkingOptionId?.trim() ?? "";
-  const featureValues = config.featureValues;
+  const providerOptions = config.providerOptions;
   return {
     provider: config.provider,
     cwd,
     ...(modeId ? { modeId } : {}),
     ...(model ? { model } : {}),
     ...(thinkingOptionId ? { thinkingOptionId } : {}),
-    ...(featureValues && Object.keys(featureValues).length > 0 ? { featureValues } : {}),
+    ...(providerOptions && Object.keys(providerOptions).length > 0 ? { providerOptions } : {}),
   };
 }

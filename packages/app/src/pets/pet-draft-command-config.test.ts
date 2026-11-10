@@ -24,7 +24,7 @@ describe("resolvePetDraftCommandConfig", () => {
           modeId: " ",
           model: "",
           thinkingOptionId: "high",
-          featureValues: {},
+          providerOptions: {},
         },
       }),
     ).toEqual({
@@ -41,13 +41,13 @@ describe("resolvePetDraftCommandConfig", () => {
         config: {
           provider: "codex",
           cwd: "/repo",
-          featureValues: { "web-search": true, effort: "high" },
+          providerOptions: { "web-search": true, effort: "high" },
         },
       }),
     ).toEqual({
       provider: "codex",
       cwd: "/repo",
-      featureValues: { "web-search": true, effort: "high" },
+      providerOptions: { "web-search": true, effort: "high" },
     });
   });
 });
