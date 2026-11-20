@@ -9850,6 +9850,69 @@ test.each([
   },
 );
 
+test("turns an agent starts on its own keep its finish unread until it is read", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-autonomous-finish-unread-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  class AutonomousClient extends TestAgentClient {
+    readonly session = new TestAgentSession({ provider: "codex", cwd: workdir });
+
+    override async createSession(): Promise<AgentSession> {
+      return this.session;
+    }
+  }
+
+  const client = new AutonomousClient();
+  const attention: Array<{ reason: string; attentionTimestamp: Date | null }> = [];
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    logger,
+    onAgentAttention: ({ reason, attentionTimestamp }) =>
+      attention.push({ reason, attentionTimestamp }),
+  });
+  onTestFinished(async () => {
+    await manager.closeAgent(agent.id);
+    await manager.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  });
+  const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  async function runAutonomousTurn(turnId: string): Promise<void> {
+    const running = waitForAgentLifecycle(manager, agent.id, "running");
+    client.session.pushEvent({ type: "turn_started", provider: "codex", turnId });
+    await running;
+    const idle = waitForAgentLifecycle(manager, agent.id, "idle");
+    client.session.pushEvent({ type: "turn_completed", provider: "codex", turnId });
+    await idle;
+  }
+
+  // A background task's output wakes the agent three times while nobody reads it.
+  await runAutonomousTurn("wake-1");
+  await runAutonomousTurn("wake-2");
+  await runAutonomousTurn("wake-3");
+  // Each finish is reported, and all three belong to the same unread finish.
+  const unreadFinish = attention[0]?.attentionTimestamp;
+  expect(unreadFinish).toBeInstanceOf(Date);
+  expect(attention).toEqual([
+    { reason: "finished", attentionTimestamp: unreadFinish },
+    { reason: "finished", attentionTimestamp: unreadFinish },
+    { reason: "finished", attentionTimestamp: unreadFinish },
+  ]);
+  expect(toAgentPayload(manager.getAgent(agent.id)!)).toMatchObject({
+    requiresAttention: true,
+    attentionReason: "finished",
+  });
+
+  // After the user reads the agent, its next finish is a new unread finish.
+  await manager.clearAgentAttention(agent.id);
+  await runAutonomousTurn("wake-4");
+  expect(attention).toHaveLength(4);
+  expect(attention[3]?.reason).toBe("finished");
+  expect(attention[3]?.attentionTimestamp).not.toBe(unreadFinish);
+});
+
 test("streamAgent clears pending run when startTurn fails before a turn id exists", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-start-turn-failure-"));
   const storagePath = join(workdir, "agents");
@@ -10194,6 +10257,8 @@ test("a sender's start wait follows its prompt across a stale-session retry", as
 
 test("a sender's start wait follows its prompt when the session is stale before the wait begins", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-immediate-stale-start-"));
+  const resumeEntered = deferred<void>();
+  const releaseResume = deferred<void>();
   class StaleStartSession extends TestAgentSession {
     override async startTurn(): Promise<{ turnId: string }> {
       throw new StaleProviderSessionError("stale-bridge");
@@ -10202,6 +10267,15 @@ test("a sender's start wait follows its prompt when the session is stale before 
   class StaleStartClient extends ResumeTrackingTestAgentClient {
     override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
       return new StaleStartSession(config);
+    }
+
+    override async resumeSession(
+      handle: AgentPersistenceHandle,
+      config?: Partial<AgentSessionConfig>,
+    ): Promise<AgentSession> {
+      resumeEntered.resolve();
+      await releaseResume.promise;
+      return await super.resumeSession(handle, config);
     }
   }
   const client = new StaleStartClient();
@@ -10215,9 +10289,11 @@ test("a sender's start wait follows its prompt when the session is stale before 
       runOptions: { clientMessageId: "immediate-stale-start" },
     });
     // The stale start has failed and been cleared before the sender begins waiting.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await resumeEntered.promise;
     expect(manager.hasInFlightRun(agent.id)).toBe(false);
-    await expect(dispatchStarted(dispatch)).resolves.toBeUndefined();
+    const senderWait = dispatchStarted(dispatch);
+    releaseResume.resolve();
+    await expect(senderWait).resolves.toBeUndefined();
     await client.waitForRetryStart();
     expect(manager.getTimeline(agent.id).filter((item) => item.type === "user_message")).toEqual([
       expect.objectContaining({
@@ -10226,6 +10302,7 @@ test("a sender's start wait follows its prompt when the session is stale before 
       }),
     ]);
   } finally {
+    releaseResume.resolve();
     manager.prepareForShutdown();
     await Promise.all(manager.listAgents().map((agent) => manager.closeAgent(agent.id)));
     await manager.flushForShutdown();
@@ -15330,27 +15407,29 @@ test("lists and stops heartbeat background work across provider session closure"
   });
   const events: AgentManagerEvent[] = [];
   manager.subscribe((event) => events.push(event), { agentId: agent.id, replayState: false });
+  const heartbeatKey = { agentId: agent.id, namespace: "heartbeat", id: "schedule-1" } as const;
   const heartbeat = {
-    agentId: agent.id,
-    scheduleId: "schedule-1",
-    name: "Check build",
-    createdAt: "2026-10-06T10:00:00.000Z",
+    ...heartbeatKey,
+    kind: "heartbeat",
+    countsAsRunning: false,
+    description: "Check build",
+    startedAt: "2026-10-06T10:00:00.000Z",
     stop: async () => {
       stopped.push("schedule-1");
-      manager.removeHeartbeatBackgroundWork(agent.id, "schedule-1");
+      manager.removeDaemonBackgroundWork(heartbeatKey);
     },
   };
   try {
-    manager.setHeartbeatBackgroundWork(heartbeat);
+    manager.setDaemonBackgroundWork(heartbeat);
     const [item] = manager.listAgentBackgroundWork(agent.id);
     expect(item).toMatchObject({
       kind: "heartbeat",
       description: "Check build",
-      startedAt: heartbeat.createdAt,
+      startedAt: heartbeat.startedAt,
       canStop: true,
       stopToken: expect.any(String),
     });
-    manager.setHeartbeatBackgroundWork({ ...heartbeat, name: "Check CI" });
+    manager.setDaemonBackgroundWork({ ...heartbeat, description: "Check CI" });
     const renamed = { ...item, description: "Check CI" };
 
     activeSession?.pushEvent({
@@ -15359,7 +15438,10 @@ test("lists and stops heartbeat background work across provider session closure"
       items: [{ id: item.id, kind: "shell", description: null, canStop: true }],
     });
     await vi.waitFor(() =>
-      expect(manager.getAgentBackgroundWorkSummary(agent.id)).toEqual({ count: 2 }),
+      expect(manager.getAgentBackgroundWorkSummary(agent.id)).toEqual({
+        count: 2,
+        runningCount: 1,
+      }),
     );
     const providerItem = manager
       .listAgentBackgroundWork(agent.id)
@@ -15381,7 +15463,7 @@ test("lists and stops heartbeat background work across provider session closure"
     await manager.closeAgent(agent.id);
     expect(manager.getAgent(agent.id)).toBeNull();
     expect(manager.listAgentBackgroundWork(agent.id)).toEqual([renamed]);
-    expect(manager.getAgentBackgroundWorkSummary(agent.id)).toEqual({ count: 1 });
+    expect(manager.getAgentBackgroundWorkSummary(agent.id)).toEqual({ count: 1, runningCount: 0 });
     expect(events.slice(eventsBeforeClose)).toContainEqual({
       type: "background_work",
       agentId: agent.id,
@@ -15403,7 +15485,7 @@ test("lists and stops heartbeat background work across provider session closure"
     expect(manager.getAgentBackgroundWorkSummary(agent.id)).toBeUndefined();
     expect(events.at(-1)).toEqual({ type: "background_work", agentId: agent.id, items: [] });
 
-    manager.setHeartbeatBackgroundWork(heartbeat);
+    manager.setDaemonBackgroundWork(heartbeat);
     await expect(
       manager.stopAgentBackgroundWork({ ...stop, canManageAutomation: true }),
     ).rejects.toThrow();
@@ -15672,7 +15754,7 @@ test.each(["turn_completed", "turn_failed", "turn_canceled"] as const)(
   },
 );
 
-test("an idle-only prompt rejects a busy recipient before changing its mode", async () => {
+test("an idle-only prompt waits for idle and checks admission before handoff", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-queued-mode-"));
   class ModeSession extends SteeringTestSession {
     mode = "plan";
@@ -15735,6 +15817,24 @@ test("an idle-only prompt rejects a busy recipient before changing its mode", as
     await providerStarted;
     session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "active-turn-1" });
     await vi.waitFor(() => expect(manager.hasInFlightRun(agent.id)).toBe(false));
+
+    let queued = true;
+    const withdrawn = await sendPreparedPromptToAgent({
+      agentManager: manager,
+      agentStorage: storage,
+      agentId: agent.id,
+      prompt: "withdrawn follow-up",
+      idleOnly: true,
+      admit: () => queued,
+      onDispatch: () => {
+        queued = false;
+      },
+      logger,
+    });
+    await expect(dispatchStarted(withdrawn)).rejects.toThrow("canceled before its turn started");
+    expect(session.startPrompts).toEqual(["other turn"]);
+    expect(manager.hasInFlightRun(agent.id)).toBe(false);
+
     await sendPreparedPromptToAgent({
       agentManager: manager,
       agentStorage: storage,
