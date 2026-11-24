@@ -16,6 +16,16 @@ on:
   push:
     branches: [main, "trial/**"]
   workflow_dispatch:
+    inputs:
+      runner:
+        description: "macOS runner label"
+        type: choice
+        default: macos-15-intel
+        options:
+          - macos-15-intel
+          - macos-26-intel
+          - macos-15
+          - macos-26
 
 env:
   BUNDLE_ID: tg.tgqq3913.tool8
@@ -23,12 +33,12 @@ env:
 
 jobs:
   build:
-    runs-on: macos-15 # macos-26 is being cancelled while queued; macos-15 also ships Xcode 26.x
+    runs-on: ${{ inputs.runner || 'macos-15-intel' }} # arm64 池拥堵时改用 Intel 池；两者均预装 Xcode 26.x
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode 26 (macos-15 defaults to an older one)
+      - name: Select Xcode 26 (macos-15 images default to Xcode 16)
         run: |
           set -euo pipefail
           XCODE=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
