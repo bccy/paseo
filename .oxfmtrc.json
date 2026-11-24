@@ -15,6 +15,7 @@
     "*.lock",
     "**/*.gen.ts",
     "**/*.gen.tsx",
-    "packages/app/src/pets/whale-moe-core.js"
+    "packages/app/src/pets/whale-moe-core.js",
+    "packages/react-native-enriched-markdown/**"
   ]
 }
